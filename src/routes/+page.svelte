@@ -12,6 +12,8 @@
   import type { AnnotTool, Signature } from "$lib/AnnotLayer.svelte";
   import SignatureDialog from "$lib/SignatureDialog.svelte";
   import DocDialogs, { type DocDialog } from "$lib/DocDialogs.svelte";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { printDocument } from "$lib/print";
   import {
     closeDocument,
@@ -395,6 +397,40 @@
     }
   }
 
+  // ---- Updates ----
+
+  let update: Update | null = $state(null);
+  let updating = $state(false);
+
+  async function checkForUpdate() {
+    try {
+      update = await check();
+    } catch {
+      // Offline, no release yet, or a dev build: stay quiet.
+    }
+  }
+
+  async function installUpdate() {
+    if (!update) return;
+    if (anyDirty) {
+      const ok = await ask("You have unsaved changes. Install the update and restart anyway?", {
+        title: APP_NAME,
+        kind: "warning",
+        okLabel: "Restart",
+        cancelLabel: "Cancel",
+      });
+      if (!ok) return;
+    }
+    updating = true;
+    try {
+      await update.downloadAndInstall();
+      await relaunch();
+    } catch (e) {
+      error = `Update failed: ${e}`;
+      updating = false;
+    }
+  }
+
   // ---- Document dialogs, More menu, redaction ----
 
   let docDialog: DocDialog | null = $state(null);
@@ -596,6 +632,9 @@
       }
       await appWindow.destroy();
     });
+
+    // Release builds look for a newer version on GitHub a few seconds after start.
+    if (import.meta.env.PROD) setTimeout(checkForUpdate, 4000);
 
     takeStartupFiles().then(async (files) => {
       for (const f of files) await load(f);
@@ -833,6 +872,16 @@ ${t.doc.path}` : t.doc.path}>
         {:else if annotTool === "signature"}Click where the signature should go · Esc to cancel
         {:else}Drag on the page to draw{/if}
       </span>
+    </div>
+  {/if}
+
+  {#if update}
+    <div class="notice" role="status">
+      Version {update.version} is available.
+      <button class="primary small-btn" disabled={updating} onclick={installUpdate}>
+        {updating ? "Installing…" : "Install and restart"}
+      </button>
+      <button class="link" onclick={() => (update = null)}>Later</button>
     </div>
   {/if}
 
@@ -1363,6 +1412,11 @@ ${t.doc.path}` : t.doc.path}>
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+  .small-btn {
+    min-height: 26px;
+    padding: 2px 10px;
+    margin: 0 6px;
   }
   .danger-btn {
     margin-left: 8px;

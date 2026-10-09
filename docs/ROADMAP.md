@@ -21,7 +21,7 @@ Editing text and images is the selling point, so it comes right after the viewer
 | 2 | **Editing:** edit existing text, add text, replace/move/resize/delete/add images, undo/redo, save/save-as | **done** |
 | 3 | Annotations and forms: highlight, underline, strikeout, notes, ink, shapes, AcroForm fill, signatures | **done** |
 | 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | **done** |
-| 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | next |
+| 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | **done** |
 | Later | OCR (Tesseract), digital certificate signatures, compare | |
 
 ## How text editing works (Phase 2)
@@ -95,6 +95,31 @@ and use the toolbar above it, drag thumbnails to reorder, or press Del to delete
 - Extracted and split files contain the pages and their annotations, but not the document's
   bookmarks or form structure.
 - Pages of password-protected PDFs can't be reordered yet (lopdf limitation).
+
+## Polish (Phase 5)
+Code: `src-tauri/src/docops.rs`, `src-tauri/src/redact.rs`, `.github/workflows/build.yml`.
+
+- **Export as images:** PNG or JPEG at 72/150/300 dpi.
+- **Properties:** file details; title/author/subject/keywords written to the Info dictionary.
+- **Passwords:** AES-256 (PDF 2.0, revision 6) with print/copy/edit permissions. Protected PDFs are
+  decrypted in memory when opened, so every feature works on them, and encrypted again on save.
+- **Reduce file size:** opaque over-resolution images are resampled to JPEG at 220/150/96 dpi, then
+  unused objects are removed and the file is repacked with compressed object streams. Undoable.
+- **Redaction:** mark areas in Edit mode, then apply. Text under an area is removed (partly
+  covered text objects are rebuilt from their other characters), covered image pixels are blacked
+  out in the image data, shapes entirely inside are removed, touching annotations and form
+  widgets are deleted, and black boxes are drawn.
+- **Builds:** GitHub Actions builds Windows, macOS (Apple silicon and Intel) and Linux installers
+  and runs the engine tests on each. A `v*` tag creates a draft release.
+- **Auto-update:** release builds check GitHub for `latest.json` and offer "Install and restart".
+  Updates are signed; the public key is in `tauri.conf.json`, the private key must be stored as
+  the `TAURI_SIGNING_PRIVATE_KEY` repository secret.
+
+### Known limits
+- macOS builds are not code-signed or notarized yet: first launch needs right-click → Open.
+- Windows installers are not code-signed yet (SmartScreen warning).
+- Redaction keeps vector shapes that are only partly under an area (they carry no text).
+- Compression skips images with transparency.
 
 ## Performance targets
 - Cold start < 1 s; first page < 300 ms; < 150 MB RAM with a 100-page document open.

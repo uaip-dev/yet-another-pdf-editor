@@ -54,5 +54,16 @@
         "mimeType": "application/pdf"
       }
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDAwRDQ3OTY4MkNENUZCNDMKUldSRCs5VXNhSG5VQUNraUxscGVUQ3huUWViME1ZRno3UjY0RGtDQXRMUzFsamlzVHFVK0FaKysK",
+      "endpoints": [
+        "https://github.com/uaip-dev/yet-another-pdf-editor/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

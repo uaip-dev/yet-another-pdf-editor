@@ -1,0 +1,110 @@
+# Builds installers for Windows, macOS and Linux.
+# - Run manually (Actions > Build > Run workflow): installers are attached
+#   to the run as artifacts.
+# - Push a tag like v0.2.0: a draft GitHub Release is created with the
+#   installers and the updater manifest (latest.json). Publishing the draft
+#   makes the update available to existing installs.
+# Signed updates need the repository secret TAURI_SIGNING_PRIVATE_KEY
+# (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD if the key has one).
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pdfium: win-x64
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            pdfium: mac-arm64
+            target: aarch64-apple-darwin
+          - os: macos-13
+            pdfium: mac-x64
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            pdfium: linux-x64
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf fonts-dejavu-core
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Fetch PDFium
+        shell: bash
+        run: ./scripts/fetch-pdfium.sh ${{ matrix.pdfium }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate test PDFs
+        shell: bash
+        run: |
+          python -m pip install --quiet reportlab pypdf pillow
+          python scripts/make-test-pdfs.py test-pdfs
+
+      - name: Engine tests
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: "Yet Another PDF Editor ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install this version."
+          releaseDraft: true
+          includeUpdaterJson: true
+          # Signed updater artifacts only when the signing key is configured.
+          args: >-
+            --target ${{ matrix.target }}
+            ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && '--config src-tauri/tauri.updater.conf.json' || '' }}
+
+      - name: Upload installers
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.pdfium }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.rpm
+          if-no-files-found: warn

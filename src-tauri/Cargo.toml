@@ -23,6 +23,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 tauri-plugin-log = "2"
 log = "0.4"
 # pdfium_7350 adds FPDFPage_InsertObjectAtIndex (present in our pinned PDFium build)
