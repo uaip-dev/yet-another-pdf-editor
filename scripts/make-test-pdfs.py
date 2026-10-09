@@ -53,3 +53,18 @@ c.addOutlineEntry("Section 1.1", "p1", level=1)
 c.addOutlineEntry("Chapter 2", "p2", level=0)
 c.save()
 print("wrote outline-links.pdf")
+
+# Image page + replacement images for edit tests
+from PIL import Image, ImageDraw
+img = Image.new("RGB", (400, 200), (40, 120, 220))
+ImageDraw.Draw(img).rectangle((20, 20, 180, 180), fill=(250, 200, 40))
+img.save(out / "blue.png")
+Image.new("RGB", (300, 300), (220, 40, 60)).save(out / "red-square.png")
+Image.new("RGB", (160, 90), (30, 160, 80)).save(out / "green.jpg", quality=90)
+c = canvas.Canvas(str(out / "image-page.pdf"), pagesize=A4)
+c.setFont("Helvetica", 14)
+c.drawString(72, 780, "Image test page")
+c.drawImage(str(out / "blue.png"), 72, 500, width=300, height=150)
+c.drawString(72, 470, "Caption under the image")
+c.save()
+print("wrote image-page.pdf and replacement images")

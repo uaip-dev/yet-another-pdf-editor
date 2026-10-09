@@ -1,3 +1,4 @@
+mod edit;
 mod engine;
 
 use engine::{DocId, DocInfo, Engine, Link, OutlineItem, PageText, SearchHit};

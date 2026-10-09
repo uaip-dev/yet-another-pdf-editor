@@ -7,6 +7,7 @@
 //! All coordinates handed to the UI are in PDF points with a top-left origin,
 //! in the page's displayed orientation (after /Rotate and the crop box).
 
+use crate::edit;
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -84,7 +85,7 @@ pub struct SearchHit {
 
 /// Maps PDF user space to top-left, rotated page space.
 #[derive(Clone, Copy)]
-struct Geom {
+pub(crate) struct Geom {
     left: f32,
     top: f32,
     w: f32,
@@ -93,7 +94,7 @@ struct Geom {
 }
 
 impl Geom {
-    fn of(page: &PdfPage) -> Self {
+    pub(crate) fn of(page: &PdfPage) -> Self {
         let rect = page
             .boundaries()
             .crop()
@@ -122,7 +123,7 @@ impl Geom {
         }
     }
 
-    fn point(&self, x: f32, y: f32) -> (f32, f32) {
+    pub(crate) fn point(&self, x: f32, y: f32) -> (f32, f32) {
         let (u, v) = (x - self.left, self.top - y);
         match self.rot {
             1 => (self.h - v, u),
@@ -132,20 +133,149 @@ impl Geom {
         }
     }
 
+    /// Inverse of `point`: displayed page space to user space.
+    pub(crate) fn unpoint(&self, px: f32, py: f32) -> (f32, f32) {
+        let (u, v) = match self.rot {
+            1 => (py, self.h - px),
+            2 => (self.w - px, self.h - py),
+            3 => (self.w - py, px),
+            _ => (px, py),
+        };
+        (u + self.left, self.top - v)
+    }
+
+    /// Displayed page width and height.
+    pub(crate) fn display_size(&self) -> (f32, f32) {
+        if self.rot % 2 == 1 {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        }
+    }
+
     /// Returns [left, top, right, bottom] in page space.
     fn rect(&self, r: &PdfRect) -> [f32; 4] {
-        let (ax, ay) = self.point(r.left().value, r.top().value);
-        let (bx, by) = self.point(r.right().value, r.bottom().value);
+        self.user_rect([r.left().value, r.bottom().value, r.right().value, r.top().value])
+    }
+
+    /// User-space [left, bottom, right, top] to displayed [left, top, right, bottom].
+    pub(crate) fn user_rect(&self, r: [f32; 4]) -> [f32; 4] {
+        let (ax, ay) = self.point(r[0], r[3]);
+        let (bx, by) = self.point(r[2], r[1]);
+        [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]
+    }
+
+    /// Displayed [left, top, right, bottom] to user-space [left, bottom, right, top].
+    pub(crate) fn display_rect(&self, r: [f32; 4]) -> [f32; 4] {
+        let (ax, ay) = self.unpoint(r[0], r[1]);
+        let (bx, by) = self.unpoint(r[2], r[3]);
         [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]
     }
 }
 
 struct OpenDoc<'a> {
     doc: PdfDocument<'a>,
+    path: String,
+    password: Option<String>,
     text: HashMap<u16, Arc<PageText>>,
+    models: HashMap<u16, Arc<edit::PageModel>>,
+    fonts: edit::Fonts,
+    /// Snapshots of the whole document taken before each edit.
+    undo: Vec<Vec<u8>>,
+    redo: Vec<Vec<u8>>,
+    dirty: bool,
+    /// Bumped on every change; edit requests must name the revision they saw.
+    revision: u32,
 }
 
-impl OpenDoc<'_> {
+/// Result of a change, so the UI can refresh and update its controls.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocState {
+    pub revision: u32,
+    pub dirty: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Characters drawn with a substitute font by the last edit.
+    pub substituted: String,
+    pub path: String,
+}
+
+/// Editable targets on a page.
+#[derive(Clone, Copy, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Target {
+    Block,
+    Image,
+}
+
+const UNDO_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+const UNDO_LIMIT_STEPS: usize = 50;
+pub const ERR_STALE: &str = "STALE";
+
+impl<'a> OpenDoc<'a> {
+    fn state(&self, substituted: String) -> DocState {
+        DocState {
+            revision: self.revision,
+            dirty: self.dirty,
+            can_undo: !self.undo.is_empty(),
+            can_redo: !self.redo.is_empty(),
+            substituted,
+            path: self.path.clone(),
+        }
+    }
+
+    fn model(&mut self, page: u16) -> Result<Arc<edit::PageModel>, String> {
+        if let Some(m) = self.models.get(&page) {
+            return Ok(m.clone());
+        }
+        let p = self.doc.pages().get(page).map_err(err)?;
+        let m = Arc::new(edit::analyse(&p));
+        self.models.insert(page, m.clone());
+        Ok(m)
+    }
+
+    fn check(&self, revision: u32) -> Result<(), String> {
+        if revision == self.revision {
+            Ok(())
+        } else {
+            Err(ERR_STALE.into())
+        }
+    }
+
+    /// Records an undo snapshot; call before changing the document.
+    fn snapshot(&mut self) -> Result<(), String> {
+        let bytes = self.doc.save_to_bytes().map_err(err)?;
+        self.undo.push(bytes);
+        self.redo.clear();
+        while self.undo.len() > UNDO_LIMIT_STEPS
+            || (self.undo.len() > 1 && self.undo.iter().map(Vec::len).sum::<usize>() > UNDO_LIMIT_BYTES)
+        {
+            self.undo.remove(0);
+        }
+        Ok(())
+    }
+
+    /// Call after a change: drops caches and bumps the revision.
+    fn changed(&mut self) {
+        self.text.clear();
+        self.models.clear();
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    /// Replaces the document with one loaded from `bytes` (undo/redo).
+    fn reload(&mut self, pdfium: &'a Pdfium, bytes: Vec<u8>) -> Result<(), String> {
+        let doc = pdfium
+            .load_pdf_from_byte_vec(bytes.clone(), None)
+            .or_else(|_| pdfium.load_pdf_from_byte_vec(bytes, self.password.as_deref()))
+            .map_err(err)?;
+        self.doc = doc;
+        self.fonts.loaded.clear(); // tokens belong to the old document
+        self.changed();
+        Ok(())
+    }
+
     fn page_text(&mut self, index: u16) -> Result<Arc<PageText>, String> {
         if let Some(t) = self.text.get(&index) {
             return Ok(t.clone());
@@ -202,17 +332,213 @@ impl Engine {
     }
 
     pub async fn open(&self, path: String, password: Option<String>) -> Result<DocInfo, String> {
-        // pdfium-render ties the document's lifetime to the password borrow,
-        // though PDFium copies it. Leaking a few bytes per password-protected
-        // open satisfies the borrow checker.
-        let password: Option<&'static str> = password.map(|p| &*Box::leak(p.into_boxed_str()));
         self.run(move |docs| {
-            let doc = docs.pdfium.load_pdf_from_file(Path::new(&path), password).map_err(err)?;
+            // Read into memory so the file is never locked and can be saved over.
+            let bytes = std::fs::read(Path::new(&path)).map_err(|e| format!("{e}"))?;
+            let doc = docs.pdfium.load_pdf_from_byte_vec(bytes, password.as_deref()).map_err(err)?;
             let id = docs.next_id;
             docs.next_id += 1;
             let info = doc_info(id, &path, &doc);
-            docs.open.insert(id, OpenDoc { doc, text: HashMap::new() });
+            docs.open.insert(
+                id,
+                OpenDoc {
+                    doc,
+                    path,
+                    password,
+                    text: HashMap::new(),
+                    models: HashMap::new(),
+                    fonts: edit::Fonts::default(),
+                    undo: Vec::new(),
+                    redo: Vec::new(),
+                    dirty: false,
+                    revision: 0,
+                },
+            );
             Ok(info)
+        })
+        .await
+    }
+
+    pub async fn state(&self, id: DocId) -> Result<DocState, String> {
+        self.run(move |docs| Ok(docs.get(id)?.state(String::new()))).await
+    }
+
+    pub async fn page_layout(&self, id: DocId, page: u16) -> Result<(u32, edit::PageLayout), String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let model = d.model(page)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            Ok((d.revision, model.layout(&geom)))
+        })
+        .await
+    }
+
+    pub async fn edit_text(
+        &self,
+        id: DocId,
+        page: u16,
+        revision: u32,
+        block: usize,
+        text: String,
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let model = d.model(page)?;
+            let b = model.blocks.get(block).ok_or("Unknown text block")?;
+            let current: String = b.chars.iter().map(|c| c.0).collect();
+            if current == text.replace("\r\n", "\n") {
+                return Ok(d.state(String::new()));
+            }
+            d.snapshot()?;
+            let note = edit::edit_text(&mut d.doc, &mut d.fonts, page, &model, block, &text)?;
+            d.changed();
+            Ok(d.state(note.substituted))
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_text(
+        &self,
+        id: DocId,
+        page: u16,
+        at: (f32, f32),
+        text: String,
+        size: f32,
+        family: String,
+        bold: bool,
+        italic: bool,
+        color: (u8, u8, u8),
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            if text.trim().is_empty() {
+                return Ok(d.state(String::new()));
+            }
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            d.snapshot()?;
+            let note = edit::add_text(
+                &mut d.doc, &mut d.fonts, page, &geom, at, &text, size, &family, bold, italic, color,
+            )?;
+            d.changed();
+            Ok(d.state(note.substituted))
+        })
+        .await
+    }
+
+    /// Moves/resizes a block or image to a new displayed rect.
+    pub async fn transform(
+        &self,
+        id: DocId,
+        page: u16,
+        revision: u32,
+        target: Target,
+        index: usize,
+        rect: [f32; 4],
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let model = d.model(page)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            let (objects, from) = target_objects(&model, target, index)?;
+            d.snapshot()?;
+            edit::transform_objects(&d.doc, page, &objects, from, geom.display_rect(rect))?;
+            d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn delete(&self, id: DocId, page: u16, revision: u32, target: Target, index: usize) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let model = d.model(page)?;
+            let (objects, _) = target_objects(&model, target, index)?;
+            d.snapshot()?;
+            edit::delete_objects(&d.doc, page, &objects)?;
+            d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn replace_image(
+        &self,
+        id: DocId,
+        page: u16,
+        revision: u32,
+        index: usize,
+        path: String,
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let model = d.model(page)?;
+            let obj = model.images.get(index).ok_or("Unknown image")?.index;
+            d.snapshot()?;
+            edit::replace_image(&d.doc, page, obj, &path)?;
+            d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn add_image(&self, id: DocId, page: u16, at: (f32, f32), path: String) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            d.snapshot()?;
+            edit::add_image(&d.doc, page, &geom, at, &path)?;
+            d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    /// Undo (or redo) the last change by swapping in a document snapshot.
+    pub async fn undo(&self, id: DocId, redo: bool) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let Some(bytes) = (if redo { d.redo.pop() } else { d.undo.pop() }) else {
+                return Ok(d.state(String::new()));
+            };
+            let current = d.doc.save_to_bytes().map_err(err)?;
+            if redo {
+                d.undo.push(current)
+            } else {
+                d.redo.push(current)
+            }
+            d.reload(pdfium, bytes)?;
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    /// Saves to `path` (or the document's own path). Writes a temp file and
+    /// renames it over the target so a failed save never corrupts the file.
+    /// The existing file is first copied to `backup_dir`.
+    pub async fn save(&self, id: DocId, path: Option<String>, backup_dir: Option<PathBuf>) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let target = path.unwrap_or_else(|| d.path.clone());
+            let bytes = d.doc.save_to_bytes().map_err(err)?;
+            let target_path = Path::new(&target);
+            if let (Some(dir), true) = (backup_dir, target_path.exists()) {
+                backup(&dir, target_path);
+            }
+            let tmp = target_path.with_extension("pdf.yape-tmp");
+            std::fs::write(&tmp, &bytes).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, target_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Could not save {target}: {e}")
+            })?;
+            d.path = target;
+            d.dirty = false;
+            Ok(d.state(String::new()))
         })
         .await
     }
@@ -284,6 +610,38 @@ fn fold(c: u32, match_case: bool) -> u32 {
     }
 }
 
+fn target_objects(model: &edit::PageModel, target: Target, index: usize) -> Result<(Vec<usize>, [f32; 4]), String> {
+    match target {
+        Target::Block => {
+            let b = model.blocks.get(index).ok_or("Unknown text block")?;
+            Ok((b.objects.clone(), b.bbox))
+        }
+        Target::Image => {
+            let im = model.images.get(index).ok_or("Unknown image")?;
+            Ok((vec![im.index], im.bbox))
+        }
+    }
+}
+
+/// Keeps a copy of a file before it is overwritten (newest 20 kept).
+fn backup(dir: &Path, file: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let _ = std::fs::copy(file, dir.join(format!("{stamp}-{name}")));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut files: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        files.sort();
+        let excess = files.len().saturating_sub(20);
+        for f in files.into_iter().take(excess) {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+}
+
 fn bind(lib_dirs: &[PathBuf]) -> Result<Box<dyn PdfiumLibraryBindings>, String> {
     let name = Pdfium::pdfium_platform_library_name();
     for dir in lib_dirs {
@@ -298,7 +656,7 @@ fn bind(lib_dirs: &[PathBuf]) -> Result<Box<dyn PdfiumLibraryBindings>, String> 
         .map_err(|e| format!("Could not load PDFium library ({name:?}): {e:?}"))
 }
 
-fn err(e: PdfiumError) -> String {
+pub(crate) fn err(e: PdfiumError) -> String {
     match e {
         PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
             ERR_PASSWORD.to_string()
@@ -515,5 +873,156 @@ mod tests {
         let links = e.links(doc.id, 0).await.unwrap();
         assert!(links.iter().any(|l| l.page == Some(2)));
         assert!(links.iter().any(|l| l.uri.as_deref() == Some("https://example.com/")));
+    }
+
+    fn page_string(t: &PageText) -> String {
+        t.codes.iter().filter_map(|&c| char::from_u32(c)).collect()
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("yape-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[tokio::test]
+    async fn edit_text_undo_redo_save() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let heading = layout.blocks.iter().find(|b| b.text == "Page 1").expect("heading block");
+        assert!(heading.size > 27.0 && heading.size < 29.0);
+        assert!(heading.bold && heading.family == "sans-serif");
+        // The 30 body lines share font, size and spacing, so they form one paragraph.
+        assert!(layout.blocks.iter().any(|b| b.text.starts_with("Line 1: The quick") && b.text.contains("Line 30:")));
+
+        let st = e.edit_text(doc.id, 0, rev, heading.id, "Halaman Satu é".into()).await.unwrap();
+        assert!(st.dirty && st.can_undo && !st.can_redo);
+        assert_eq!(st.substituted, "", "non-embedded Helvetica covers WinAnsi");
+        let text = page_string(&e.page_text(doc.id, 0).await.unwrap());
+        assert!(text.contains("Halaman Satu é") && !text.contains("Page 1"), "{}", &text[..60]);
+
+        // A stale revision is rejected.
+        assert_eq!(e.edit_text(doc.id, 0, rev, 0, "x".into()).await.err().as_deref(), Some(ERR_STALE));
+
+        let st = e.undo(doc.id, false).await.unwrap();
+        assert!(st.can_redo);
+        assert!(page_string(&e.page_text(doc.id, 0).await.unwrap()).contains("Page 1"));
+        e.undo(doc.id, true).await.unwrap();
+        assert!(page_string(&e.page_text(doc.id, 0).await.unwrap()).contains("Halaman Satu"));
+
+        let out = temp_path("edited.pdf");
+        let st = e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
+        assert!(!st.dirty);
+        let reopened = e.open(out.to_string_lossy().into(), None).await.unwrap();
+        assert_eq!(reopened.pages.len(), 200);
+        assert!(page_string(&e.page_text(reopened.id, 0).await.unwrap()).contains("Halaman Satu é"));
+    }
+
+    #[tokio::test]
+    async fn rewraps_long_paragraph_inside_its_width() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let body = layout.blocks.iter().find(|b| b.text.starts_with("Line 1:")).unwrap();
+        let longer = format!("{} and then some more words to force wrapping", body.text);
+        e.edit_text(doc.id, 0, rev, body.id, longer).await.unwrap();
+        let (_, after) = e.page_layout(doc.id, 0).await.unwrap();
+        let b = after.blocks.iter().find(|b| b.text.starts_with("Line 1:")).unwrap();
+        assert!(b.text.ends_with("force wrapping"), "{}", b.text);
+        assert!(b.rect[2] <= body.rect[2] + body.size, "stays within original width");
+    }
+
+    #[tokio::test]
+    async fn move_delete_and_add_text() {
+        let Some(path) = corpus("image-page.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let cap = layout.blocks.iter().find(|b| b.text.starts_with("Caption")).unwrap();
+        let r = cap.rect;
+        let moved = [r[0] + 100.0, r[1] + 50.0, r[2] + 100.0, r[3] + 50.0];
+        let st = e.transform(doc.id, 0, rev, Target::Block, cap.id, moved).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let cap2 = layout.blocks.iter().find(|b| b.text.starts_with("Caption")).unwrap();
+        assert!((cap2.rect[0] - moved[0]).abs() < 0.5 && (cap2.rect[1] - moved[1]).abs() < 0.5);
+        assert_eq!(st.revision, rev);
+
+        e.delete(doc.id, 0, rev, Target::Block, cap2.id).await.unwrap();
+        assert!(!page_string(&e.page_text(doc.id, 0).await.unwrap()).contains("Caption"));
+
+        e.add_text(doc.id, 0, (100.0, 100.0), "New note\nsecond line".into(), 12.0, "serif".into(), false, true, (200, 0, 0))
+            .await
+            .unwrap();
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let note = layout.blocks.iter().find(|b| b.text.starts_with("New note")).expect("new block");
+        assert_eq!(note.text, "New note second line");
+        assert!((note.rect[0] - 100.0).abs() < 2.0 && (note.rect[1] - 100.0).abs() < 6.0, "{:?}", note.rect);
+        assert!(note.italic && note.family == "serif" && note.color == "#c80000");
+    }
+
+    #[tokio::test]
+    async fn replace_move_and_add_images() {
+        let (Some(path), Some(red), Some(jpg)) = (corpus("image-page.pdf"), corpus("red-square.png"), corpus("green.jpg")) else {
+            return;
+        };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        assert_eq!(layout.images.len(), 1);
+        let im = &layout.images[0];
+        assert_eq!((im.width, im.height), (400, 200));
+
+        // A square into a 2:1 frame: fitted to the frame's height and centred.
+        e.replace_image(doc.id, 0, rev, 0, red).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let new = &layout.images[0];
+        assert_eq!((new.width, new.height), (300, 300));
+        let (w, h) = (new.rect[2] - new.rect[0], new.rect[3] - new.rect[1]);
+        assert!((w - h).abs() < 0.5 && (h - (im.rect[3] - im.rect[1])).abs() < 0.5, "{w}x{h}");
+        assert!(((new.rect[0] + new.rect[2]) / 2.0 - (im.rect[0] + im.rect[2]) / 2.0).abs() < 0.5);
+
+        let target = [50.0, 60.0, 250.0, 260.0];
+        e.transform(doc.id, 0, rev, Target::Image, 0, target).await.unwrap();
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        for (a, b) in layout.images[0].rect.iter().zip(target) {
+            assert!((a - b).abs() < 0.5, "{:?}", layout.images[0].rect);
+        }
+
+        e.add_image(doc.id, 0, (300.0, 400.0), jpg).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        assert_eq!(layout.images.len(), 2);
+        let added = layout.images.iter().find(|i| i.width == 160).unwrap();
+        assert!((added.rect[0] - 300.0).abs() < 0.5 && (added.rect[1] - 400.0).abs() < 0.5);
+        assert!((added.rect[2] - added.rect[0] - 120.0).abs() < 0.5, "160px at 96dpi = 120pt");
+
+        e.delete(doc.id, 0, rev, Target::Image, added.id).await.unwrap();
+        assert_eq!(e.page_layout(doc.id, 0).await.unwrap().1.images.len(), 1);
+    }
+
+    /// Optional: a real Chromium-generated PDF with subset fonts, if present locally.
+    /// Asserts only on structure, never on the (private) content.
+    #[tokio::test]
+    async fn sample_subset_font_editing() {
+        let Some(path) = corpus("Catatan_Mesyuarat_SPP.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        assert!(layout.blocks.len() > 5, "glyph objects are grouped into blocks");
+        let b = layout.blocks.iter().max_by_key(|b| b.text.len()).unwrap();
+        let head: String = b.text.chars().take(5).collect();
+        // Append a character no subset here contains, plus covered text.
+        let new_text = format!("{} Ω{head}", b.text);
+        let st = e.edit_text(doc.id, 0, rev, b.id, new_text.clone()).await.unwrap();
+        assert!(st.substituted.contains('Ω'), "substituted: {:?}", st.substituted);
+        let text = page_string(&e.page_text(doc.id, 0).await.unwrap());
+        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tail: Vec<&str> = new_text.split_whitespace().collect();
+        let tail = tail[tail.len().saturating_sub(3)..].join(" ");
+        assert!(squash(&text).contains(&tail), "edited text is extractable: {tail:?}");
+        let out = temp_path("sample-edited.pdf");
+        e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
     }
 }

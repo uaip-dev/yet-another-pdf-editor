@@ -11,3 +11,6 @@ vite.config.ts.timestamp-*
 
 # Local test corpus (scripts/make-test-pdfs.py)
 /test-pdfs/
+
+# Never commit PDFs (user samples may be private)
+*.pdf
