@@ -20,8 +20,8 @@ Editing text and images is the selling point, so it comes right after the viewer
 | 1 | Viewer: thumbnails, outline, text select/copy, search, links, print, recent files, file association, tabs | **done** |
 | 2 | **Editing:** edit existing text, add text, replace/move/resize/delete/add images, undo/redo, save/save-as | **done** |
 | 3 | Annotations and forms: highlight, underline, strikeout, notes, ink, shapes, AcroForm fill, signatures | **done** |
-| 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | next |
-| 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | |
+| 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | **done** |
+| 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | next |
 | Later | OCR (Tesseract), digital certificate signatures, compare | |
 
 ## How text editing works (Phase 2)
@@ -77,6 +77,24 @@ Code: `src-tauri/src/annots.rs`, `src-tauri/src/forms.rs`.
 - Signatures are visual (an image), not cryptographic digital signatures.
 - pdfium-render bugs worked around: annotation colour getters crash PDFium on annotations with
   appearance streams (not used); radio buttons report "checked" when unselected (own check).
+
+## Page management (Phase 4)
+Code: `src-tauri/src/pages.rs`. Select pages in the thumbnail panel (click, Ctrl+click, Shift+click)
+and use the toolbar above it, drag thumbnails to reorder, or press Del to delete.
+
+- Rotate, delete, insert (blank page, pages from another PDF, image as page), extract to a new PDF
+  and split every N pages all use PDFium, with undo; a failed operation rolls back.
+- **Reordering** uses lopdf: the page tree is flattened (inherited Resources/MediaBox/CropBox/Rotate
+  pushed down to each page) and rewritten as an incremental update, so bookmarks, links, form
+  fields and metadata keep pointing at the right pages. Rebuilding the document in a new order
+  with PDFium would have dropped them.
+- Thumbnail reordering uses pointer events: Tauri's file-drop handling on Windows disables HTML5
+  drag and drop inside the page.
+
+### Known limits
+- Extracted and split files contain the pages and their annotations, but not the document's
+  bookmarks or form structure.
+- Pages of password-protected PDFs can't be reordered yet (lopdf limitation).
 
 ## Performance targets
 - Cold start < 1 s; first page < 300 ms; < 150 MB RAM with a 100-page document open.

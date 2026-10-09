@@ -7,10 +7,16 @@
     currentPage: number;
     /** Document revision; thumbnails are redrawn when it changes. */
     revision?: number;
+    /** Selected page indices (for page operations). */
+    selected: number[];
     onselect: (page: number) => void;
+    onselectionchange: (pages: number[]) => void;
+    /** Drag and drop: move `pages` before original index `before`. */
+    onmove: (pages: number[], before: number) => void;
+    ondelete: (pages: number[]) => void;
   }
 
-  let { doc, currentPage, revision = 0, onselect }: Props = $props();
+  let { doc, currentPage, revision = 0, selected, onselect, onselectionchange, onmove, ondelete }: Props = $props();
 
   const THUMB_W = 120;
 
@@ -19,6 +25,10 @@
   let canvases: HTMLCanvasElement[] = $state([]);
   const drawn = new Set<number>();
   const visible = new Set<number>();
+  let anchor = 0;
+  // Drag and drop
+  let dragging: number[] | null = $state(null);
+  let dropBefore: number | null = $state(null);
 
   async function draw(i: number, force = false) {
     if (drawn.has(i) && !force) return;
@@ -55,6 +65,96 @@
       scroller.scrollTop = top + el.offsetHeight - scroller.clientHeight + 8;
   });
 
+  function onClick(e: MouseEvent, i: number) {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    if (e.shiftKey) {
+      const [a, b] = [Math.min(anchor, i), Math.max(anchor, i)];
+      onselectionchange(Array.from({ length: b - a + 1 }, (_, k) => a + k));
+    } else if (e.ctrlKey || e.metaKey) {
+      onselectionchange(selected.includes(i) ? selected.filter((p) => p !== i) : [...selected, i].sort((x, y) => x - y));
+      anchor = i;
+    } else {
+      onselectionchange([i]);
+      anchor = i;
+      onselect(i);
+    }
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if ((e.key === "Delete" || e.key === "Backspace") && selected.length) {
+      e.preventDefault();
+      e.stopPropagation();
+      ondelete(selected);
+    } else if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      onselectionchange(doc.pages.map((_, i) => i));
+    }
+  }
+
+  // Reordering uses pointer events: on Windows, Tauri's file drop handling
+  // disables HTML5 drag and drop inside the page.
+  let suppressClick = false;
+
+  function onPointerDown(e: PointerEvent, i: number) {
+    if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+    const [sx, sy] = [e.clientX, e.clientY];
+    let started = false;
+    let scrollTimer: ReturnType<typeof setInterval> | undefined;
+    let lastY = sy;
+    const target = (x: number, y: number) => {
+      const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>(".thumb");
+      if (!el || !scroller.contains(el)) return;
+      const k = Number(el.dataset.index);
+      const r = el.getBoundingClientRect();
+      dropBefore = y < r.top + r.height / 2 ? k : k + 1;
+    };
+    const move = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
+        started = true;
+        const pages = selected.includes(i) ? selected : [i];
+        if (!selected.includes(i)) onselectionchange([i]);
+        dragging = pages;
+        // Auto-scroll while dragging near the panel's top or bottom edge.
+        scrollTimer = setInterval(() => {
+          const r = scroller.getBoundingClientRect();
+          if (lastY < r.top + 30) scroller.scrollTop -= 14;
+          else if (lastY > r.bottom - 30) scroller.scrollTop += 14;
+        }, 30);
+      }
+      lastY = ev.clientY;
+      target(ev.clientX, ev.clientY);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      clearInterval(scrollTimer);
+      if (started) {
+        suppressClick = true;
+        finishDrag();
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  function finishDrag() {
+    const pages = dragging;
+    const before = dropBefore;
+    dragging = null;
+    dropBefore = null;
+    if (!pages || before === null) return;
+    // Dropping a block right where it already is changes nothing.
+    const sorted = [...pages].sort((a, b) => a - b);
+    const contiguous = sorted.every((p, k) => k === 0 || p === sorted[k - 1] + 1);
+    if (contiguous && before >= sorted[0] && before <= sorted[sorted.length - 1] + 1) return;
+    onmove(sorted, before);
+  }
+
   onMount(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -76,15 +176,23 @@
   });
 </script>
 
-<div class="thumbs" bind:this={scroller}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="thumbs" class:reordering={!!dragging} bind:this={scroller} onkeydown={onKey}>
   {#each doc.pages as page, i (i)}
     <button
       class="thumb"
       class:current={i === currentPage}
+      class:selected={selected.includes(i)}
+      class:drop-before={dropBefore === i}
+      class:drop-after={dropBefore === i + 1 && i === doc.pages.length - 1}
+      class:dragged={dragging?.includes(i)}
       data-index={i}
       bind:this={items[i]}
-      onclick={() => onselect(i)}
+      draggable="false"
+      onpointerdown={(e) => onPointerDown(e, i)}
+      onclick={(e) => onClick(e, i)}
       aria-label="Page {i + 1}"
+      aria-pressed={selected.includes(i)}
     >
       <canvas
         bind:this={canvases[i]}
@@ -99,15 +207,18 @@
 <style>
   .thumbs {
     position: relative;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 10px 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 6px;
+    outline: none;
   }
   .thumb {
+    position: relative;
     flex: none;
     display: flex;
     flex-direction: column;
@@ -123,7 +234,34 @@
     background: var(--btn-hover);
   }
   .thumb.current {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .thumb.selected {
     border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .thumb.dragged {
+    opacity: 0.45;
+  }
+  .reordering,
+  .reordering .thumb {
+    cursor: grabbing;
+  }
+  .thumb.drop-before::before,
+  .thumb.drop-after::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .thumb.drop-before::before {
+    top: -5px;
+  }
+  .thumb.drop-after::after {
+    bottom: -5px;
   }
   canvas {
     display: block;

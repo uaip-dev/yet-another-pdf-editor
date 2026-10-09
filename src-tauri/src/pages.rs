@@ -122,6 +122,9 @@ fn write_atomic(bytes: &[u8], out: &Path) -> Result<(), String> {
 
 const INHERITABLE: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 
+/// Attributes a page inherits from its ancestors in the page tree.
+type Inherited = Vec<(Vec<u8>, Object)>;
+
 fn lo(e: lopdf::Error) -> String {
     format!("PDF structure error: {e}")
 }
@@ -158,7 +161,7 @@ pub fn move_pages(bytes: &[u8], pages: &[u16], before: u16) -> Result<Vec<u8>, S
         .and_then(Object::as_reference)
         .map_err(lo)?;
     // Resolve inherited attributes before flattening the tree.
-    let mut inherited: Vec<(ObjectId, Vec<(Vec<u8>, Object)>)> = Vec::new();
+    let mut inherited: Vec<(ObjectId, Inherited)> = Vec::new();
     for &id in &order {
         let mut found = Vec::new();
         let page = prev.get_dictionary(id).map_err(lo)?;

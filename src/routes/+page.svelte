@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { message, open, save as saveDialog } from "@tauri-apps/plugin-dialog";
+  import { ask, message, open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,6 +29,16 @@
     type DocState,
     type NewTextStyle,
     hexToRgb,
+    rotatePages,
+    deletePages,
+    movePages,
+    insertBlankPage,
+    insertPagesFromFile,
+    insertImagePage,
+    extractPages,
+    splitDocument,
+    pageLabel,
+    IMAGE_FILTERS,
     type OutlineItem,
     type SearchHit,
   } from "$lib/api";
@@ -51,6 +61,10 @@
     dirty: boolean;
     canUndo: boolean;
     canRedo: boolean;
+    /** Bumped when the page list changes, to rebuild the views. */
+    structure: number;
+    /** Pages selected in the thumbnail panel. */
+    pageSel: number[];
   }
 
   let tabs: Tab[] = $state([]);
@@ -173,6 +187,8 @@
         dirty: false,
         canUndo: false,
         canRedo: false,
+        structure: 0,
+        pageSel: [],
       };
       tabs.push(t);
       activeKey = t.key;
@@ -212,6 +228,18 @@
     t.canUndo = s.canUndo;
     t.canRedo = s.canRedo;
     if (s.path !== t.doc.path) t.doc = { ...t.doc, path: s.path };
+    if (s.pages) {
+      const old = t.doc.pages;
+      const same =
+        old.length === s.pages.length &&
+        old.every((p, i) => p.width === s.pages![i].width && p.height === s.pages![i].height);
+      if (!same) {
+        t.doc = { ...t.doc, pages: s.pages };
+        t.currentPage = Math.min(t.currentPage, s.pages.length - 1);
+        t.pageSel = t.pageSel.filter((p) => p < s.pages!.length);
+        t.structure++;
+      }
+    }
     // Search results point into the old text.
     t.hits = [];
     t.activeHit = -1;
@@ -363,6 +391,76 @@
       findNext(e.shiftKey ? -1 : 1);
     } else if (e.key === "Escape") {
       closeSearch();
+    }
+  }
+
+  // ---- Pages ----
+
+  let splitFor: Tab | null = $state(null);
+  let splitEvery = $state(1);
+
+  const targetPages = (t: Tab) => (t.pageSel.length ? [...t.pageSel].sort((a, b) => a - b) : [t.currentPage]);
+
+  async function deleteSelectedPages(t: Tab, pages = targetPages(t)) {
+    if (pages.length >= t.doc.pages.length) {
+      error = "A document must keep at least one page.";
+      return;
+    }
+    const ok = await ask(`Delete page${pages.length > 1 ? "s" : ""} ${pageLabel(pages)}? You can undo this.`, {
+      title: APP_NAME,
+      kind: "warning",
+      okLabel: "Delete",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    t.pageSel = [];
+    await changeDoc(t, () => deletePages(t.doc.id, pages));
+  }
+
+  async function insertPages(t: Tab, kind: "blank" | "file" | "image") {
+    const sel = targetPages(t);
+    const at = sel[sel.length - 1] + 1;
+    if (kind === "blank") {
+      const ref = t.doc.pages[at - 1];
+      await changeDoc(t, () => insertBlankPage(t.doc.id, at, ref.width, ref.height));
+    } else if (kind === "file") {
+      const path = await open({ multiple: false, directory: false, filters: [{ name: "PDF", extensions: ["pdf"] }] });
+      if (path) await changeDoc(t, () => insertPagesFromFile(t.doc.id, at, path));
+    } else {
+      const path = await open({ multiple: false, directory: false, filters: IMAGE_FILTERS });
+      if (path) await changeDoc(t, () => insertImagePage(t.doc.id, at, path));
+    }
+    t.pageSel = [at];
+    views[t.key]?.goToPage(at);
+  }
+
+  async function extractSelected(t: Tab) {
+    const pages = targetPages(t);
+    const stem = fileName(t.doc.path).replace(/\.pdf$/i, "");
+    const out = await saveDialog({
+      defaultPath: t.doc.path.replace(/[^\\/]*$/, `${stem} (pages ${pageLabel(pages).replace(/, /g, ",")}).pdf`),
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (!out) return;
+    try {
+      await extractPages(t.doc.id, pages, out.toLowerCase().endsWith(".pdf") ? out : `${out}.pdf`);
+      showNotice(`Saved page${pages.length > 1 ? "s" : ""} ${pageLabel(pages)} to ${fileName(out)}`);
+    } catch (e) {
+      error = `Could not extract pages: ${e}`;
+    }
+  }
+
+  async function runSplit() {
+    const t = splitFor;
+    if (!t) return;
+    splitFor = null;
+    const dir = await open({ directory: true, multiple: false, title: "Choose a folder for the split files" });
+    if (!dir) return;
+    try {
+      const files = await splitDocument(t.doc.id, Math.max(1, Math.floor(splitEvery)), dir);
+      showNotice(`Created ${files.length} files in ${dir}`);
+    } catch (e) {
+      error = `Could not split: ${e}`;
     }
   }
 
@@ -715,7 +813,37 @@ ${t.doc.path}` : t.doc.path}>
         <div class="side-body">
           {#key tab.key}
             {#if sidebarTab === "thumbs"}
-              <Thumbnails doc={tab.doc} currentPage={tab.currentPage} revision={tab.revision} onselect={(p) => view?.goToPage(p)} />
+              {@const t = tab}
+              <div class="page-tools" role="toolbar" aria-label="Page tools">
+                <button class="icon-btn small" title="Rotate left" aria-label="Rotate left" onclick={() => changeDoc(t, () => rotatePages(t.doc.id, targetPages(t), -90))}><Icon name="rotateLeft" size={16} /></button>
+                <button class="icon-btn small" title="Rotate right" aria-label="Rotate right" onclick={() => changeDoc(t, () => rotatePages(t.doc.id, targetPages(t), 90))}><Icon name="rotateRight" size={16} /></button>
+                <button class="icon-btn small" title="Delete pages (Del)" aria-label="Delete pages" onclick={() => deleteSelectedPages(t)}><Icon name="trash" size={16} /></button>
+                <div class="menu-wrap">
+                  <button class="icon-btn small" title="Insert pages" aria-label="Insert pages" aria-haspopup="menu" onclick={(e) => e.currentTarget.nextElementSibling?.classList.toggle("open")}><Icon name="insert" size={16} /></button>
+                  <div class="menu" role="menu">
+                    <button role="menuitem" onclick={(e) => { e.currentTarget.parentElement?.classList.remove("open"); insertPages(t, "blank"); }}>Blank page</button>
+                    <button role="menuitem" onclick={(e) => { e.currentTarget.parentElement?.classList.remove("open"); insertPages(t, "file"); }}>Pages from PDF…</button>
+                    <button role="menuitem" onclick={(e) => { e.currentTarget.parentElement?.classList.remove("open"); insertPages(t, "image"); }}>Image as page…</button>
+                  </div>
+                </div>
+                <button class="icon-btn small" title="Extract pages to a new PDF" aria-label="Extract pages" onclick={() => extractSelected(t)}><Icon name="extract" size={16} /></button>
+                <button class="icon-btn small" title="Split into several PDFs" aria-label="Split document" onclick={() => { splitEvery = Math.max(1, Math.ceil(t.doc.pages.length / 2)); splitFor = t; }}><Icon name="scissors" size={16} /></button>
+              </div>
+              {#if t.pageSel.length > 1}
+                <p class="sel-info muted">{t.pageSel.length} pages selected</p>
+              {/if}
+              {#key t.structure}
+                <Thumbnails
+                  doc={t.doc}
+                  currentPage={t.currentPage}
+                  revision={t.revision}
+                  selected={t.pageSel}
+                  onselect={(p) => view?.goToPage(p)}
+                  onselectionchange={(pages) => (t.pageSel = pages)}
+                  onmove={(pages, before) => changeDoc(t, () => movePages(t.doc.id, pages, before))}
+                  ondelete={(pages) => deleteSelectedPages(t, pages)}
+                />
+              {/key}
             {:else if tab.outline?.length}
               <div class="outline-scroll">
                 <Outline items={tab.outline} onselect={(p) => view?.goToPage(p)} />
@@ -731,6 +859,7 @@ ${t.doc.path}` : t.doc.path}>
     <main class="viewer">
       {#each tabs as t (t.key)}
         <div class="view-slot" class:hidden={t.key !== activeKey}>
+          {#key t.structure}
           <PdfView
             doc={t.doc}
             bind:zoom={t.zoom}
@@ -750,6 +879,7 @@ ${t.doc.path}` : t.doc.path}>
             onannotdone={() => (annotTool = "select")}
             bind:this={views[t.key]}
           />
+          {/key}
         </div>
       {/each}
       {#if !tab}
@@ -794,6 +924,33 @@ ${t.doc.path}` : t.doc.path}>
         <button onclick={() => printing?.abort.abort()}>Cancel</button>
       </div>
     </div>
+  </div>
+{/if}
+
+{#if splitFor}
+  <div class="backdrop">
+    <form
+      class="dialog"
+      onsubmit={(e) => {
+        e.preventDefault();
+        runSplit();
+      }}
+    >
+      <h2>Split document</h2>
+      <label class="split-row">
+        Every
+        <input type="number" min="1" max={splitFor.doc.pages.length} bind:value={splitEvery} aria-label="Pages per file" />
+        pages
+      </label>
+      <p class="muted">
+        {Math.ceil(splitFor.doc.pages.length / Math.max(1, Math.floor(splitEvery) || 1))} files from {splitFor.doc.pages.length} pages.
+        The original stays unchanged.
+      </p>
+      <div class="actions">
+        <button type="button" onclick={() => (splitFor = null)}>Cancel</button>
+        <button type="submit" class="primary">Choose folder…</button>
+      </div>
+    </form>
   </div>
 {/if}
 
@@ -1131,12 +1288,63 @@ ${t.doc.path}` : t.doc.path}>
   .side-tabs button.on {
     background: var(--btn-hover);
   }
+  .page-tools {
+    display: flex;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .menu-wrap {
+    position: relative;
+  }
+  .menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 5;
+    min-width: 170px;
+    padding: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.2);
+  }
+  :global(.menu.open) {
+    display: flex;
+    flex-direction: column;
+  }
+  .menu button {
+    border: none;
+    background: transparent;
+    text-align: left;
+  }
+  .menu button:hover {
+    background: var(--btn-hover);
+  }
+  .sel-info {
+    margin: 4px 0 0;
+    text-align: center;
+    font-size: 12px;
+  }
+  .split-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .split-row input {
+    width: 5em;
+  }
   .side-body {
     flex: 1;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .outline-scroll {
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     overflow: auto;
   }
   .side-empty {

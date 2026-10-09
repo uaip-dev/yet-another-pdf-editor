@@ -466,6 +466,8 @@
       { root: scroller, rootMargin: "100% 0px" },
     );
     pageEls.forEach((el) => observer.observe(el));
+    // Rebuilt after a page operation: stay on the page the user was viewing.
+    if (currentPage > 0) goToPage(currentPage);
     return () => {
       observer.disconnect();
       clearTimeout(rerenderTimer);

@@ -12,6 +12,8 @@ It's built with Tauri 2, Svelte 5 and PDFium. See [docs/ROADMAP.md](docs/ROADMAP
   move/delete text blocks, add text, replace/move/resize/delete/add images
 - **Comment:** highlight, underline, strikethrough, sticky notes, freehand pen, rectangles, ellipses
 - **Fill & sign:** fill form fields (text, checkboxes, radio buttons, drop-downs); draw, type or upload a signature
+- **Pages:** rotate, delete, reorder by dragging thumbnails, insert blank pages, pages from another PDF
+  (merge) or images, extract pages to a new PDF, split into several files
 - **Undo/redo** (Ctrl+Z / Ctrl+Y), **save** (Ctrl+S) and **save as** (Ctrl+Shift+S), with automatic backups
 
 ## Prerequisites (Windows)

@@ -164,6 +164,8 @@ export interface DocState {
   /** Characters drawn with a substitute font by the last edit. */
   substituted: string;
   path: string;
+  /** The page list, after operations that may change it. */
+  pages: PageInfo[] | null;
 }
 
 export type Target = "block" | "image";
@@ -315,4 +317,52 @@ export function hexToRgb(hex: string): Rgb {
 export async function readImageFile(path: string): Promise<Blob> {
   const buf = await invoke<ArrayBuffer>("read_image_file", { path });
   return new Blob([buf]);
+}
+
+// ---- Pages ----
+
+export function rotatePages(id: number, pages: number[], delta: number): Promise<DocState> {
+  return invoke<DocState>("rotate_pages", { id, pages, delta });
+}
+
+export function deletePages(id: number, pages: number[]): Promise<DocState> {
+  return invoke<DocState>("delete_pages", { id, pages });
+}
+
+/** Moves `pages` so they sit before original index `before` (page count = end). */
+export function movePages(id: number, pages: number[], before: number): Promise<DocState> {
+  return invoke<DocState>("move_pages", { id, pages, before });
+}
+
+export function insertBlankPage(id: number, at: number, width: number, height: number): Promise<DocState> {
+  return invoke<DocState>("insert_blank_page", { id, at, width, height });
+}
+
+export function insertPagesFromFile(id: number, at: number, path: string, password?: string): Promise<DocState> {
+  return invoke<DocState>("insert_pages_from_file", { id, at, path, password: password ?? null });
+}
+
+export function insertImagePage(id: number, at: number, path: string): Promise<DocState> {
+  return invoke<DocState>("insert_image_page", { id, at, path });
+}
+
+export function extractPages(id: number, pages: number[], out: string): Promise<void> {
+  return invoke("extract_pages", { id, pages, out });
+}
+
+export function splitDocument(id: number, every: number, dir: string): Promise<string[]> {
+  return invoke<string[]>("split_document", { id, every, dir });
+}
+
+/** "1-3, 5" style label for 0-based page indices. */
+export function pageLabel(pages: number[]): string {
+  const s = [...pages].sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+    parts.push(i === j ? `${s[i] + 1}` : `${s[i] + 1}-${s[j] + 1}`);
+    i = j;
+  }
+  return parts.join(", ");
 }
