@@ -64,6 +64,14 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      # A release tag must match the version in the app (shown in About and
+      # used by the updater); stop before building anything if it doesn't.
+      - name: Check version
+        shell: bash
+        env:
+          TAG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: node scripts/bump-version.mjs --check
+
       - name: Fetch PDFium
         shell: bash
         run: ./scripts/fetch-pdfium.sh ${{ matrix.pdfium }}

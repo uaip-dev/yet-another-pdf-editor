@@ -42,8 +42,10 @@ pnpm tauri build    # release installers (NSIS + MSI) in src-tauri/target/releas
 ```
 
 ## Releasing
-1. Bump `version` in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
-2. Push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+1. Bump the version everywhere at once: `pnpm bump` (patch, e.g. 0.1.0 → 0.1.1), or
+   `pnpm bump minor` / `pnpm bump major` / `pnpm bump 1.2.3`. Commit the change.
+2. Push a tag with the same version: `git tag v0.1.1 && git push origin v0.1.1`.
+   The build stops early if the tag and the app version don't match.
 3. GitHub Actions builds every platform into a draft release; publish it to ship the update.
 
 The update signing key must be in the repository secret `TAURI_SIGNING_PRIVATE_KEY`

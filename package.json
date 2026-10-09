@@ -1,6 +1,6 @@
 {
   "name": "yet-another-pdf-editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Yet Another PDF Editor — lightweight open-source PDF viewer and editor",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bump": "node scripts/bump-version.mjs"
   },
   "license": "MIT",
   "dependencies": {

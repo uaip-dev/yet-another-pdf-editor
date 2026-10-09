@@ -47,8 +47,8 @@
   const open = (url: string) => openUrl(url).catch(() => {});
 
   const links: { label: string; detail: string; url: string; icon: import("./Icon.svelte").IconName }[] = [
-    { label: "Website", detail: "yetanotherpdf.dev", url: WEBSITE, icon: "globe" },
-    { label: "Source code", detail: "github.com/uaip-dev/yet-another-pdf-editor", url: REPO, icon: "file" },
+    { label: "Website", detail: `${WEBSITE}/`, url: WEBSITE, icon: "globe" },
+    { label: "Source code", detail: REPO, url: REPO, icon: "file" },
     { label: "Release notes", detail: "What's new in each version", url: `${REPO}/releases`, icon: "note" },
     { label: "Report an issue", detail: "Bugs and feature requests", url: `${REPO}/issues`, icon: "comment" },
   ];
