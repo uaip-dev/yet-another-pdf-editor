@@ -28,9 +28,12 @@ jobs:
           - os: macos-latest
             pdfium: mac-arm64
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Intel Macs: cross-compiled on Apple silicon (GitHub is retiring
+          # its Intel macOS runners, so a native job may never get a machine).
+          - os: macos-latest
             pdfium: mac-x64
             target: x86_64-apple-darwin
+            cross: true
           - os: ubuntu-22.04
             pdfium: linux-x64
             target: x86_64-unknown-linux-gnu
@@ -76,6 +79,9 @@ jobs:
           python scripts/make-test-pdfs.py test-pdfs
 
       - name: Engine tests
+        # A cross-compiled build can't run its tests on this machine; the
+        # native Apple silicon job covers macOS.
+        if: ${{ !matrix.cross }}
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - name: Build installers
