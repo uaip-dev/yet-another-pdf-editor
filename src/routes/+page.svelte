@@ -12,6 +12,7 @@
   import type { AnnotTool, Signature } from "$lib/AnnotLayer.svelte";
   import SignatureDialog from "$lib/SignatureDialog.svelte";
   import DocDialogs, { type DocDialog } from "$lib/DocDialogs.svelte";
+  import AboutDialog from "$lib/AboutDialog.svelte";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { printDocument } from "$lib/print";
@@ -400,6 +401,7 @@
   // ---- Updates ----
 
   let update: Update | null = $state(null);
+  let aboutOpen = $state(false);
   let updating = $state(false);
 
   async function checkForUpdate() {
@@ -569,6 +571,15 @@
     if (tab && mod && e.key.toLowerCase() === "e") {
       e.preventDefault();
       setMode(tool ? null : "edit");
+      return;
+    }
+    if (aboutOpen && e.key === "Escape") {
+      aboutOpen = false;
+      return;
+    }
+    if (e.key === "F1") {
+      e.preventDefault();
+      aboutOpen = true;
       return;
     }
     if (e.key === "F3") {
@@ -787,7 +798,12 @@ ${t.doc.path}` : t.doc.path}>
       {:else}
         <button class="icon-btn" onclick={openSearch} title="Find (Ctrl+F)" aria-label="Find"><Icon name="search" /></button>
       {/if}
+    {:else}
+      <span class="spacer"></span>
     {/if}
+    <button class="icon-btn" onclick={() => (aboutOpen = true)} title="About (F1)" aria-label="About Yet Another PDF Editor">
+      <Icon name="info" />
+    </button>
   </header>
 
   {#if tab && tool}
@@ -1036,6 +1052,20 @@ ${t.doc.path}` : t.doc.path}>
     onstate={(s) => applyState(t, s)}
     onnotice={showNotice}
     onclose={() => (docDialog = null)}
+  />
+{/if}
+
+{#if aboutOpen}
+  <AboutDialog
+    oncheck={async () => {
+      update = await check();
+      return update?.version ?? null;
+    }}
+    oninstall={() => {
+      aboutOpen = false;
+      installUpdate();
+    }}
+    onclose={() => (aboutOpen = false)}
   />
 {/if}
 
