@@ -448,6 +448,7 @@
           pageCount: tab.doc.pages.length,
           currentPage: tab.currentPage,
           pages: tab.pageSel.length ? [...tab.pageSel].sort((a, b) => a - b) : [tab.currentPage],
+          sizes: tab.doc.pages,
         }
       : null,
     capabilities: caps,

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DocState } from "./api";
+import type { DocState, PageInfo } from "./api";
 
 /**
  * What extension UI (the `$pro` slot, see docs/EXTENSIONS.md) can see and do.
@@ -15,6 +15,8 @@ export interface ExtensionContext {
     currentPage: number;
     /** Selected pages in the thumbnail panel (or the current page). */
     pages: number[];
+    /** Size of every page in points, as displayed (after rotation). */
+    sizes: PageInfo[];
   } | null;
   /** Feature names registered by backend extensions. */
   capabilities: string[];
