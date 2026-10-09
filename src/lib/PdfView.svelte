@@ -2,13 +2,20 @@
   import { onMount } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import EditLayer, { type EditSelection, type Tool } from "./EditLayer.svelte";
   import {
+    invalidateText,
+    pageLayout,
     pageLinks,
     pageText,
     renderPage,
+    STALE,
     textOf,
     type DocInfo,
+    type DocState,
     type Link,
+    type NewTextStyle,
+    type PageLayout,
     type PageText,
     type SearchHit,
   } from "./api";
@@ -30,6 +37,14 @@
     currentPage: number;
     searchHits?: SearchHit[];
     activeHit?: number;
+    /** Editing tool, or null when just viewing. */
+    tool?: Tool | null;
+    /** Document revision; any change re-renders and reloads page data. */
+    revision?: number;
+    newTextStyle: NewTextStyle;
+    onstate?: (s: DocState) => void;
+    onerror?: (message: string) => void;
+    ontooldone?: () => void;
   }
 
   let {
@@ -38,6 +53,12 @@
     currentPage = $bindable(0),
     searchHits = [],
     activeHit = -1,
+    tool = null,
+    revision = 0,
+    newTextStyle,
+    onstate,
+    onerror,
+    ontooldone,
   }: Props = $props();
 
   const PT_TO_PX = 96 / 72;
@@ -56,6 +77,12 @@
 
   let selection: Selection | null = $state(null);
   let dragging = false;
+
+  // Editing
+  const layouts = new SvelteMap<number, PageLayout>();
+  const editLayers: Record<number, EditLayer> = $state({});
+  let editSel: EditSelection | null = $state(null);
+  let busy = false;
 
   // Non-reactive render bookkeeping.
   const renderedWidth = new Map<number, number>(); // page -> bitmap px width on canvas
@@ -98,8 +125,53 @@
   }
 
   function loadOverlay(i: number) {
+    if (tool) {
+      if (!layouts.has(i)) pageLayout(doc.id, i).then((l) => layouts.set(i, l), console.error);
+      return;
+    }
     if (!texts.has(i)) pageText(doc.id, i).then((t) => texts.set(i, t), console.error);
     if (!links.has(i)) pageLinks(doc.id, i).then((l) => links.set(i, l), console.error);
+  }
+
+  /** Runs one document change at a time and reports the new state. */
+  async function run(op: () => Promise<DocState>): Promise<boolean> {
+    if (busy) return false;
+    busy = true;
+    try {
+      onstate?.(await op());
+      return true;
+    } catch (e) {
+      if (e === STALE) {
+        layouts.clear();
+        nearPages.forEach(loadOverlay);
+        onerror?.("The page changed before that edit was applied. Please try again.");
+      } else {
+        onerror?.(String(e));
+      }
+      return false;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Keyboard actions for the selected object; returns true if handled. */
+  export function handleEditKey(e: KeyboardEvent): boolean {
+    if (!tool || !editSel) return false;
+    const layer = editLayers[editSel.page];
+    if (!layer) return false;
+    const step = e.shiftKey ? 10 : 1;
+    const moves: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+    };
+    if (e.key === "Delete" || e.key === "Backspace") layer.deleteSelected();
+    else if (e.key === "Enter") layer.editSelected();
+    else if (e.key === "Escape") editSel = null;
+    else if (moves[e.key]) layer.nudge(...moves[e.key]);
+    else return false;
+    return true;
   }
 
   function release(i: number) {
@@ -279,6 +351,38 @@
     setZoom(zoom * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
   }
 
+  // Any document change: drop cached page data and re-render what is visible.
+  // The old bitmaps stay on screen until the new ones arrive (no flicker).
+  let seenRevision = -1;
+  $effect(() => {
+    const r = revision;
+    if (seenRevision !== -1 && r !== seenRevision) {
+      invalidateText(doc.id);
+      texts.clear();
+      links.clear();
+      layouts.clear();
+      renderedWidth.clear();
+      selection = null;
+      editSel = null;
+      nearPages.forEach((i) => {
+        ensureRendered(i);
+        loadOverlay(i);
+      });
+    }
+    seenRevision = r;
+  });
+
+  // Entering or leaving edit mode switches which page data is needed.
+  $effect(() => {
+    if (tool) {
+      selection = null;
+      nearPages.forEach(loadOverlay);
+    } else {
+      editSel = null;
+      nearPages.forEach(loadOverlay);
+    }
+  });
+
   // After a zoom change the canvases are CSS-stretched immediately;
   // re-render them sharply once zooming settles.
   $effect(() => {
@@ -327,7 +431,23 @@
       onpointerdown={(e) => onPagePointerDown(e, i)}
     >
       <canvas bind:this={canvases[i]}></canvas>
-      {#if nearPages.has(i)}
+      {#if tool && nearPages.has(i) && layouts.get(i)}
+        <EditLayer
+          bind:this={editLayers[i]}
+          docId={doc.id}
+          page={i}
+          width={page.width}
+          height={page.height}
+          scale={zoom * PT_TO_PX}
+          layout={layouts.get(i)!}
+          {tool}
+          selection={editSel}
+          {newTextStyle}
+          onselect={(s) => (editSel = s)}
+          {run}
+          ondone={() => ontooldone?.()}
+        />
+      {:else if !tool && nearPages.has(i)}
         {@const t = texts.get(i)}
         <svg class="overlay" viewBox="0 0 {page.width} {page.height}" preserveAspectRatio="none">
           {#if t}

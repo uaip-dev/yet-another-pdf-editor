@@ -5,10 +5,12 @@
   interface Props {
     doc: DocInfo;
     currentPage: number;
+    /** Document revision; thumbnails are redrawn when it changes. */
+    revision?: number;
     onselect: (page: number) => void;
   }
 
-  let { doc, currentPage, onselect }: Props = $props();
+  let { doc, currentPage, revision = 0, onselect }: Props = $props();
 
   const THUMB_W = 120;
 
@@ -16,9 +18,10 @@
   let items: HTMLButtonElement[] = $state([]);
   let canvases: HTMLCanvasElement[] = $state([]);
   const drawn = new Set<number>();
+  const visible = new Set<number>();
 
-  async function draw(i: number) {
-    if (drawn.has(i)) return;
+  async function draw(i: number, force = false) {
+    if (drawn.has(i) && !force) return;
     drawn.add(i);
     try {
       const bmp = await renderPage(doc.id, i, Math.round(THUMB_W * devicePixelRatio));
@@ -34,9 +37,22 @@
     }
   }
 
-  // Keep the current page's thumbnail in view.
+  let seenRevision = -1;
   $effect(() => {
-    items[currentPage]?.scrollIntoView({ block: "nearest" });
+    const r = revision;
+    if (seenRevision !== -1 && r !== seenRevision) visible.forEach((i) => draw(i, true));
+    seenRevision = r;
+  });
+
+  // Keep the current page's thumbnail in view. (scrollIntoView would also
+  // scroll the window itself, shifting the whole app.)
+  $effect(() => {
+    const el = items[currentPage];
+    if (!el || !scroller) return;
+    const top = el.offsetTop; // .thumbs is the offset parent
+    if (top < scroller.scrollTop) scroller.scrollTop = top - 8;
+    else if (top + el.offsetHeight > scroller.scrollTop + scroller.clientHeight)
+      scroller.scrollTop = top + el.offsetHeight - scroller.clientHeight + 8;
   });
 
   onMount(() => {
@@ -44,8 +60,13 @@
       (entries) => {
         for (const entry of entries) {
           const i = Number((entry.target as HTMLElement).dataset.index);
-          if (entry.isIntersecting) draw(i);
-          else if (drawn.delete(i) && canvases[i]) canvases[i].width = canvases[i].height = 0;
+          if (entry.isIntersecting) {
+            visible.add(i);
+            draw(i);
+          } else {
+            visible.delete(i);
+            if (drawn.delete(i) && canvases[i]) canvases[i].width = canvases[i].height = 0;
+          }
         }
       },
       { root: scroller, rootMargin: "300px 0px" },
@@ -77,6 +98,7 @@
 
 <style>
   .thumbs {
+    position: relative;
     height: 100%;
     overflow-y: auto;
     padding: 10px 0;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { message, open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -8,6 +8,7 @@
   import Thumbnails from "$lib/Thumbnails.svelte";
   import Outline from "$lib/Outline.svelte";
   import Icon from "$lib/Icon.svelte";
+  import type { Tool } from "$lib/EditLayer.svelte";
   import { printDocument } from "$lib/print";
   import {
     closeDocument,
@@ -19,7 +20,12 @@
     rememberRecent,
     search as runSearchApi,
     takeStartupFiles,
+    saveDocument,
+    undo as undoApi,
+    redo as redoApi,
     type DocInfo,
+    type DocState,
+    type NewTextStyle,
     type OutlineItem,
     type SearchHit,
   } from "$lib/api";
@@ -38,6 +44,10 @@
     matchCase: boolean;
     hits: SearchHit[];
     activeHit: number;
+    revision: number;
+    dirty: boolean;
+    canUndo: boolean;
+    canRedo: boolean;
   }
 
   let tabs: Tab[] = $state([]);
@@ -48,6 +58,14 @@
   const view = $derived(tab ? views[tab.key] : undefined);
 
   let error = $state("");
+  let notice = $state("");
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Editing
+  let tool: Tool | null = $state(null);
+  let newTextStyle: NewTextStyle = $state({ size: 12, family: "sans-serif", bold: false, italic: false, color: [0, 0, 0] });
+  let newTextColor = $state("#000000");
+  const anyDirty = $derived(tabs.some((t) => t.dirty));
   let dragging = $state(false);
   let recent = $state(recentFiles());
 
@@ -102,6 +120,10 @@
         matchCase: false,
         hits: [],
         activeHit: -1,
+        revision: 0,
+        dirty: false,
+        canUndo: false,
+        canRedo: false,
       };
       tabs.push(t);
       activeKey = t.key;
@@ -128,7 +150,73 @@
     }
   }
 
-  function closeTab(key: number) {
+  function showNotice(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = ""), 8000);
+  }
+
+  /** Applies the result of a document change to its tab. */
+  function applyState(t: Tab, s: DocState) {
+    t.revision = s.revision;
+    t.dirty = s.dirty;
+    t.canUndo = s.canUndo;
+    t.canRedo = s.canRedo;
+    if (s.path !== t.doc.path) t.doc = { ...t.doc, path: s.path };
+    // Search results point into the old text.
+    t.hits = [];
+    t.activeHit = -1;
+    t.searchedQuery = "";
+    if (s.substituted) {
+      showNotice(
+        `The document's embedded font has no glyphs for “${s.substituted}”, so a similar font was used for those characters.`,
+      );
+    }
+  }
+
+  async function changeDoc(t: Tab, op: () => Promise<DocState>) {
+    try {
+      applyState(t, await op());
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function saveTab(t: Tab, as = false): Promise<boolean> {
+    let path: string | undefined;
+    if (as) {
+      const picked = await saveDialog({ defaultPath: t.doc.path, filters: [{ name: "PDF", extensions: ["pdf"] }] });
+      if (!picked) return false;
+      path = picked.toLowerCase().endsWith(".pdf") ? picked : `${picked}.pdf`;
+    }
+    try {
+      applyState(t, await saveDocument(t.doc.id, path));
+      recent = rememberRecent(t.doc.path);
+      showNotice(`Saved ${fileName(t.doc.path)}`);
+      return true;
+    } catch (e) {
+      error = `Could not save: ${e}`;
+      return false;
+    }
+  }
+
+  /** Asks about unsaved changes; returns false if the user cancelled. */
+  async function confirmDiscard(t: Tab): Promise<boolean> {
+    if (!t.dirty) return true;
+    const answer = await message(`Save changes to ${fileName(t.doc.path)} before closing?`, {
+      title: APP_NAME,
+      kind: "warning",
+      buttons: { yes: "Save", no: "Don't save", cancel: "Cancel" },
+    });
+    if (answer === "Yes" || answer === "Save") return saveTab(t);
+    return answer === "No" || answer === "Don't save";
+  }
+
+  async function closeTab(key: number) {
+    const i0 = tabs.findIndex((t) => t.key === key);
+    if (i0 < 0) return;
+    activeKey = key;
+    if (!(await confirmDiscard(tabs[i0]))) return;
     const i = tabs.findIndex((t) => t.key === key);
     if (i < 0) return;
     const [t] = tabs.splice(i, 1);
@@ -251,6 +339,34 @@
   function onKey(e: KeyboardEvent) {
     const typing = (e.target as HTMLElement)?.closest?.("input, select, textarea");
     const mod = e.ctrlKey || e.metaKey;
+    if (tool && !typing && !mod && view?.handleEditKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (tab && mod && !typing) {
+      const k = e.key.toLowerCase();
+      const t = tab;
+      if (k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        if (t.canUndo) changeDoc(t, () => undoApi(t.doc.id));
+        return;
+      }
+      if (k === "y" || (k === "z" && e.shiftKey)) {
+        e.preventDefault();
+        if (t.canRedo) changeDoc(t, () => redoApi(t.doc.id));
+        return;
+      }
+    }
+    if (tab && mod && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      saveTab(tab, e.shiftKey);
+      return;
+    }
+    if (tab && mod && e.key.toLowerCase() === "e") {
+      e.preventDefault();
+      tool = tool ? null : "edit";
+      return;
+    }
     if (e.key === "F3") {
       e.preventDefault();
       if (tab?.query) findNext(e.shiftKey ? -1 : 1);
@@ -274,8 +390,8 @@
     else if (k === "-") stepZoom(-1);
     else if (k === "0") view?.setZoom(1);
     else if (k === "b") toggleSidebar();
-    else if (k === "c" && !typing) view?.copySelection();
-    else if (k === "a" && !typing) view?.selectAll();
+    else if (k === "c" && !typing && !tool) view?.copySelection();
+    else if (k === "a" && !typing && !tool) view?.selectAll();
     else handled = false;
     if (handled) e.preventDefault();
   }
@@ -292,6 +408,26 @@
       if (!(e.target as HTMLElement).closest("input, textarea")) e.preventDefault();
     };
     window.addEventListener("contextmenu", noMenu);
+
+    // Ask before closing the window with unsaved changes.
+    const appWindow = getCurrentWindow();
+    const unlistenClose = appWindow.onCloseRequested(async (event) => {
+      const dirty = tabs.filter((t) => t.dirty);
+      if (!dirty.length) return;
+      event.preventDefault();
+      const names = dirty.map((t) => fileName(t.doc.path)).join(", ");
+      const answer = await message(`Save changes before closing?\n\n${names}`, {
+        title: APP_NAME,
+        kind: "warning",
+        buttons: { yes: "Save all", no: "Don't save", cancel: "Cancel" },
+      });
+      if (answer === "Yes" || answer === "Save all") {
+        for (const t of dirty) if (!(await saveTab(t))) return;
+      } else if (!(answer === "No" || answer === "Don't save")) {
+        return;
+      }
+      await appWindow.destroy();
+    });
 
     takeStartupFiles().then(async (files) => {
       for (const f of files) await load(f);
@@ -310,6 +446,7 @@
     });
     return () => {
       window.removeEventListener("contextmenu", noMenu);
+      unlistenClose.then((f) => f());
       unlistenFiles.then((f) => f());
       unlistenDrop.then((f) => f());
     };
@@ -325,7 +462,7 @@
         <div class="tab" class:active={t.key === activeKey} title={t.doc.title ? `${t.doc.title}
 ${t.doc.path}` : t.doc.path}>
           <button class="tab-title" onclick={() => (activeKey = t.key)}>
-            {fileName(t.doc.path)}
+            {#if t.dirty}<span class="dirty" title="Unsaved changes">●</span>{/if}{fileName(t.doc.path)}
           </button>
           <button class="icon-btn small" onclick={() => closeTab(t.key)} title="Close (Ctrl+W)" aria-label="Close tab">
             <Icon name="close" size={14} />
@@ -346,8 +483,21 @@ ${t.doc.path}` : t.doc.path}>
     {/if}
     <button class="icon-btn" onclick={pickFile} title="Open (Ctrl+O)" aria-label="Open file"><Icon name="open" /></button>
     {#if tab}
+      <button class="icon-btn" onclick={() => saveTab(tab)} disabled={!tab.dirty} title="Save (Ctrl+S)" aria-label="Save">
+        <Icon name="save" />
+      </button>
       <button class="icon-btn" onclick={print} disabled={!!printing} title="Print (Ctrl+P)" aria-label="Print">
         <Icon name="print" />
+      </button>
+      <span class="sep"></span>
+      <button class="edit-toggle" class:on={!!tool} onclick={() => (tool = tool ? null : "edit")} title="Edit text and images (Ctrl+E)">
+        <Icon name="edit" size={16} />Edit
+      </button>
+      <button class="icon-btn" onclick={() => changeDoc(tab, () => undoApi(tab.doc.id))} disabled={!tab.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
+        <Icon name="undo" />
+      </button>
+      <button class="icon-btn" onclick={() => changeDoc(tab, () => redoApi(tab.doc.id))} disabled={!tab.canRedo} title="Redo (Ctrl+Y)" aria-label="Redo">
+        <Icon name="redo" />
       </button>
       <span class="sep"></span>
       <button class="icon-btn" onclick={() => view?.goToPage(tab.currentPage - 1)} disabled={tab.currentPage === 0} title="Previous page" aria-label="Previous page">
@@ -408,6 +558,53 @@ ${t.doc.path}` : t.doc.path}>
     {/if}
   </header>
 
+  {#if tab && tool}
+    <div class="edit-bar" role="toolbar" aria-label="Edit tools">
+      <button class="tool" class:on={tool === "edit"} onclick={() => (tool = "edit")} title="Select, move and edit text and images">
+        <Icon name="pointer" size={16} />Select
+      </button>
+      <button class="tool" class:on={tool === "addText"} onclick={() => (tool = "addText")} title="Click on the page to add text">
+        <Icon name="text" size={16} />Add text
+      </button>
+      <button class="tool" class:on={tool === "addImage"} onclick={() => (tool = "addImage")} title="Click on the page to add an image">
+        <Icon name="image" size={16} />Add image
+      </button>
+      {#if tool === "addText"}
+        <span class="sep"></span>
+        <select bind:value={newTextStyle.family} aria-label="Font">
+          <option value="sans-serif">Sans</option>
+          <option value="serif">Serif</option>
+          <option value="monospace">Mono</option>
+        </select>
+        <input class="size" type="number" min="4" max="144" bind:value={newTextStyle.size} aria-label="Font size" />
+        <button class="icon-btn style" class:on={newTextStyle.bold} onclick={() => (newTextStyle.bold = !newTextStyle.bold)} aria-label="Bold"><b>B</b></button>
+        <button class="icon-btn style" class:on={newTextStyle.italic} onclick={() => (newTextStyle.italic = !newTextStyle.italic)} aria-label="Italic"><i>I</i></button>
+        <input
+          class="color"
+          type="color"
+          bind:value={newTextColor}
+          oninput={() => {
+            const n = parseInt(newTextColor.slice(1), 16);
+            newTextStyle.color = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+          }}
+          aria-label="Text colour"
+        />
+      {/if}
+      <span class="hint muted">
+        {#if tool === "edit"}Double-click text to edit · drag to move · corners resize images · Del deletes
+        {:else if tool === "addText"}Click where the text should start · Ctrl+Enter or click outside to finish
+        {:else}Click where the image's top-left corner should go{/if}
+      </span>
+    </div>
+  {/if}
+
+  {#if notice}
+    <div class="notice" role="status">
+      {notice}
+      <button class="link" onclick={() => (notice = "")}>Dismiss</button>
+    </div>
+  {/if}
+
   {#if error}
     <div class="error" role="alert">
       {error}
@@ -425,7 +622,7 @@ ${t.doc.path}` : t.doc.path}>
         <div class="side-body">
           {#key tab.key}
             {#if sidebarTab === "thumbs"}
-              <Thumbnails doc={tab.doc} currentPage={tab.currentPage} onselect={(p) => view?.goToPage(p)} />
+              <Thumbnails doc={tab.doc} currentPage={tab.currentPage} revision={tab.revision} onselect={(p) => view?.goToPage(p)} />
             {:else if tab.outline?.length}
               <div class="outline-scroll">
                 <Outline items={tab.outline} onselect={(p) => view?.goToPage(p)} />
@@ -447,6 +644,12 @@ ${t.doc.path}` : t.doc.path}>
             bind:currentPage={t.currentPage}
             searchHits={t.hits}
             activeHit={t.activeHit}
+            tool={t.key === activeKey ? tool : null}
+            revision={t.revision}
+            {newTextStyle}
+            onstate={(s) => applyState(t, s)}
+            onerror={(m) => (error = m)}
+            ontooldone={() => (tool = "edit")}
             bind:this={views[t.key]}
           />
         </div>
@@ -559,10 +762,13 @@ ${t.doc.path}` : t.doc.path}>
     font: inherit;
     color: inherit;
   }
+  /* Pinned to the viewport so focusing or scrolling inside can never
+     scroll the window itself. */
   .app {
+    position: fixed;
+    inset: 0;
     display: flex;
     flex-direction: column;
-    height: 100vh;
   }
 
   /* Tabs */
@@ -602,6 +808,68 @@ ${t.doc.path}` : t.doc.path}>
   }
   .tab:not(.active) .tab-title {
     color: var(--muted);
+  }
+  .dirty {
+    color: var(--accent);
+    font-size: 10px;
+    margin-right: 6px;
+    vertical-align: 1px;
+  }
+  .edit-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: transparent;
+    background: transparent;
+  }
+  .edit-toggle.on {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .edit-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+    flex: none;
+    overflow-x: auto;
+  }
+  .tool {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: transparent;
+    background: transparent;
+    white-space: nowrap;
+  }
+  .tool.on {
+    background: var(--btn);
+    border-color: var(--border);
+    color: var(--accent);
+  }
+  .edit-bar .size {
+    width: 4.2em;
+  }
+  .edit-bar .color {
+    width: 34px;
+    padding: 2px;
+  }
+  .icon-btn.style {
+    font-family: Georgia, serif;
+    font-size: 15px;
+  }
+  .hint {
+    margin-left: 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .notice {
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    border-bottom: 1px solid var(--border);
   }
   .new-tab {
     margin: 0 0 4px 4px;

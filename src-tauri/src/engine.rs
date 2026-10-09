@@ -717,8 +717,8 @@ fn extract_text(page: &PdfPage) -> Result<PageText, String> {
     let geom = Geom::of(page);
     let text = page.text().map_err(err)?;
     let chars = text.chars();
-    let mut codes = Vec::with_capacity(chars.len() as usize);
-    let mut boxes = Vec::with_capacity(chars.len() as usize * 4);
+    let mut codes = Vec::with_capacity(chars.len());
+    let mut boxes = Vec::with_capacity(chars.len() * 4);
     for ch in chars.iter() {
         codes.push(ch.unicode_value());
         match ch.loose_bounds() {

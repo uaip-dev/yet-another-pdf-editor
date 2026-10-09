@@ -54,7 +54,6 @@ struct Line {
     glyphs: Vec<usize>, // into the glyph vec, left to right
     y: f32,
     size: f32,
-    left: f32,
     right: f32,
     x: f32,
 }
@@ -161,6 +160,9 @@ pub fn analyse(page: &PdfPage) -> PageModel {
     let mut glyphs: Vec<Glyph> = Vec::new();
     let mut empties: Vec<(usize, f32, f32)> = Vec::new(); // zero-width objects: index, x, y
     let mut images = Vec::new();
+    // One text page for all objects: PdfPageTextObject::text() would load a
+    // new one per call, which is quadratic on pages with a glyph per object.
+    let text_page = page.text().ok();
 
     for (index, obj) in page.objects().iter().enumerate() {
         match &obj {
@@ -173,7 +175,10 @@ pub fn analyse(page: &PdfPage) -> PageModel {
                 if m.b().abs() > 1e-3 || m.c().abs() > 1e-3 || m.a() <= 0.0 || m.d() <= 0.0 {
                     continue;
                 }
-                let text = t.text();
+                let text = match &text_page {
+                    Some(tp) => tp.for_object(t),
+                    None => t.text(),
+                };
                 if text.is_empty() {
                     empties.push((index, m.e(), m.f()));
                     continue;
@@ -281,7 +286,7 @@ fn build_lines(glyphs: &[Glyph], styles: &[Style]) -> Vec<Line> {
                 }
                 lines.push(cur.take().unwrap());
             }
-            cur = Some(Line { glyphs: vec![g], y: gl.y, size, left: gl.left, right: gl.right, x: gl.x });
+            cur = Some(Line { glyphs: vec![g], y: gl.y, size, right: gl.right, x: gl.x });
         }
         lines.extend(cur);
     }
@@ -724,7 +729,7 @@ pub fn edit_text(
     let b = model.blocks.get(block).ok_or("Unknown text block")?;
     let new_text = new_text.replace("\r\n", "\n");
     let chars = if new_text.is_empty() { Vec::new() } else { restyle(&b.chars, &new_text) };
-    let runs = (!chars.is_empty()).then(|| (chars, None));
+    let content = (!chars.is_empty()).then_some(chars);
     // Paragraphs re-wrap at their own width. A single line grows sideways
     // (like a heading) and only wraps at a right margin mirroring the left one.
     let width = if b.lines > 1 {
@@ -734,7 +739,7 @@ pub fn edit_text(
         (page_w - b.x - b.x.min(page_w * 0.15)).max(b.width * 1.02 + 1.0)
     };
     let orig = (b.lines > 1).then_some((&b.chars[..], &b.line_ranges[..], &b.line_widths[..]));
-    replace_objects(doc, fonts, page_index, model, &b.objects, runs, b.x, b.baseline, Some(width), b.line_gap, orig)
+    replace_objects(doc, fonts, page_index, model, &b.objects, content, false, b.x, b.baseline, Some(width), b.line_gap, orig)
 }
 
 /// Adds a new text block at a point in displayed page space.
@@ -767,8 +772,11 @@ pub fn add_text(
     let chars: Vec<(char, usize)> = text.replace("\r\n", "\n").chars().map(|c| (c, 0)).collect();
     // `at` is the top-left of the text box; the first baseline sits one ascent below.
     let (x, y) = geom.unpoint(at.0, at.1 + size * 0.8);
-    replace_objects(doc, fonts, page_index, &model, &[], Some((chars, Some(()))), x, y, None, size * 1.25, None)
+    replace_objects(doc, fonts, page_index, &model, &[], Some(chars), true, x, y, None, size * 1.25, None)
 }
+
+/// A block's original characters, its line ranges and their drawn widths.
+type OrigLines<'b> = (&'b [(char, usize)], &'b [(usize, usize)], &'b [f32]);
 
 /// Removes `remove` objects and draws `content` (if any) in their place.
 #[allow(clippy::too_many_arguments)]
@@ -778,20 +786,22 @@ fn replace_objects(
     page_index: u16,
     model: &PageModel,
     remove: &[usize],
-    content: Option<(Vec<(char, usize)>, Option<()>)>,
+    content: Option<Vec<(char, usize)>>,
+    // New text (no original font to reuse): standard fonts only.
+    fresh: bool,
     x0: f32,
     y0: f32,
     width: Option<f32>,
     line_gap: f32,
     // Original text and its lines: widths are measured with our own advances
     // so unchanged text wraps exactly where it did before.
-    orig: Option<(&[(char, usize)], &[(usize, usize)], &[f32])>,
+    orig: Option<OrigLines>,
 ) -> Result<EditNote, String> {
     let mut note = EditNote::default();
     let styles = &model.styles;
 
     // 1. Decide fonts per character and load any fallbacks (needs &mut doc).
-    let new_objects_only = content.as_ref().is_some_and(|(_, fresh)| fresh.is_some());
+    let new_objects_only = fresh;
     if fonts.coverage.is_none() && !new_objects_only {
         fonts.coverage = Some(scan_coverage(doc));
     }
@@ -809,7 +819,7 @@ fn replace_objects(
         }
     };
     let mut needed: Vec<FontRef> = Vec::new();
-    if let Some((chars, _)) = &content {
+    if let Some(chars) = &content {
         for &(c, s) in chars {
             if c == '\n' {
                 continue;
@@ -837,7 +847,7 @@ fn replace_objects(
     // 2. Build the new text objects (fonts borrowed from existing objects).
     let page = doc.pages().get(page_index).map_err(err)?;
     let mut new_objects = Vec::new();
-    if let Some((chars, _)) = &content {
+    if let Some(chars) = &content {
         let mut table: Vec<(FontRef, PdfFontToken, char)> = Vec::new();
         for f in &needed {
             match *f {

@@ -5,6 +5,13 @@ It's built with Tauri 2, Svelte 5 and PDFium. See [docs/ROADMAP.md](docs/ROADMAP
 
 ![Search in Yet Another PDF Editor](docs/screenshots/search.png)
 
+## Features
+- **View:** tabs, thumbnails, bookmarks, search (Ctrl+F), text selection and copy, links, zoom, print,
+  password-protected PDFs, recent files, opens `.pdf` files from Explorer
+- **Edit (Ctrl+E):** double-click text to edit it in place (keeps the original fonts where possible),
+  move/delete text blocks, add text, replace/move/resize/delete/add images
+- **Undo/redo** (Ctrl+Z / Ctrl+Y), **save** (Ctrl+S) and **save as** (Ctrl+Shift+S), with automatic backups
+
 ## Prerequisites (Windows)
 - [Rust](https://rustup.rs) (stable, MSVC toolchain) and Visual Studio C++ Build Tools
 - Node.js 20+ and pnpm

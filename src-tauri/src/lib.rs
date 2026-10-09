@@ -1,7 +1,7 @@
 mod edit;
 mod engine;
 
-use engine::{DocId, DocInfo, Engine, Link, OutlineItem, PageText, SearchHit};
+use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
 use std::sync::{Arc, Mutex};
 use tauri::{ipc::Response, AppHandle, Emitter, Manager, State};
 
@@ -57,6 +57,116 @@ async fn search(
     match_case: bool,
 ) -> Result<Vec<SearchHit>, String> {
     engine.search(id, query, match_case).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LayoutResponse {
+    revision: u32,
+    #[serde(flatten)]
+    layout: edit::PageLayout,
+}
+
+#[tauri::command]
+async fn page_layout(engine: State<'_, Engine>, id: DocId, page: u16) -> Result<LayoutResponse, String> {
+    let (revision, layout) = engine.page_layout(id, page).await?;
+    Ok(LayoutResponse { revision, layout })
+}
+
+#[tauri::command]
+async fn doc_state(engine: State<'_, Engine>, id: DocId) -> Result<DocState, String> {
+    engine.state(id).await
+}
+
+#[tauri::command]
+async fn edit_text(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    block: usize,
+    text: String,
+) -> Result<DocState, String> {
+    engine.edit_text(id, page, revision, block, text).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn add_text(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    x: f32,
+    y: f32,
+    text: String,
+    size: f32,
+    family: String,
+    bold: bool,
+    italic: bool,
+    color: [u8; 3],
+) -> Result<DocState, String> {
+    let color = (color[0], color[1], color[2]);
+    engine.add_text(id, page, (x, y), text, size, family, bold, italic, color).await
+}
+
+#[tauri::command]
+async fn transform_object(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    target: Target,
+    index: usize,
+    rect: [f32; 4],
+) -> Result<DocState, String> {
+    engine.transform(id, page, revision, target, index, rect).await
+}
+
+#[tauri::command]
+async fn delete_object(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    target: Target,
+    index: usize,
+) -> Result<DocState, String> {
+    engine.delete(id, page, revision, target, index).await
+}
+
+#[tauri::command]
+async fn replace_image(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    index: usize,
+    path: String,
+) -> Result<DocState, String> {
+    engine.replace_image(id, page, revision, index, path).await
+}
+
+#[tauri::command]
+async fn add_image(engine: State<'_, Engine>, id: DocId, page: u16, x: f32, y: f32, path: String) -> Result<DocState, String> {
+    engine.add_image(id, page, (x, y), path).await
+}
+
+#[tauri::command]
+async fn undo(engine: State<'_, Engine>, id: DocId) -> Result<DocState, String> {
+    engine.undo(id, false).await
+}
+
+#[tauri::command]
+async fn redo(engine: State<'_, Engine>, id: DocId) -> Result<DocState, String> {
+    engine.undo(id, true).await
+}
+
+/// Saves in place, or to `path` for "Save as". The previous file is backed up
+/// to the app's local data folder first.
+#[tauri::command]
+async fn save_document(app: AppHandle, engine: State<'_, Engine>, id: DocId, path: Option<String>) -> Result<DocState, String> {
+    let backups = app.path().app_local_data_dir().ok().map(|d| d.join("backups"));
+    engine.save(id, path, backups).await
 }
 
 /// Returns (once) the PDFs the app was launched with.
@@ -119,7 +229,18 @@ pub fn run() {
             page_links,
             outline,
             search,
-            take_startup_files
+            take_startup_files,
+            page_layout,
+            doc_state,
+            edit_text,
+            add_text,
+            transform_object,
+            delete_object,
+            replace_image,
+            add_image,
+            undo,
+            redo,
+            save_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
