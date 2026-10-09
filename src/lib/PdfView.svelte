@@ -3,8 +3,12 @@
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import EditLayer, { type EditSelection, type Tool } from "./EditLayer.svelte";
+  import AnnotLayer, { MARKUP_TOOLS, type AnnotTool, type Signature } from "./AnnotLayer.svelte";
+  import FormLayer from "./FormLayer.svelte";
   import {
+    addAnnotation,
     invalidateText,
+    pageExtras,
     pageLayout,
     pageLinks,
     pageText,
@@ -15,8 +19,10 @@
     type DocState,
     type Link,
     type NewTextStyle,
+    type PageExtras,
     type PageLayout,
     type PageText,
+    type Rgb,
     type SearchHit,
   } from "./api";
   import {
@@ -45,6 +51,12 @@
     onstate?: (s: DocState) => void;
     onerror?: (message: string) => void;
     ontooldone?: () => void;
+    /** Comment tool, or null when not annotating. */
+    annotTool?: AnnotTool | null;
+    annotColor?: Rgb;
+    annotWidth?: number;
+    signature?: Signature | null;
+    onannotdone?: () => void;
   }
 
   let {
@@ -59,7 +71,14 @@
     onstate,
     onerror,
     ontooldone,
+    annotTool = null,
+    annotColor = [255, 210, 0],
+    annotWidth = 2,
+    signature = null,
+    onannotdone,
   }: Props = $props();
+
+  const isMarkup = (t: AnnotTool | null) => !!t && (MARKUP_TOOLS as readonly string[]).includes(t);
 
   const PT_TO_PX = 96 / 72;
   const GAP = 12;
@@ -83,6 +102,11 @@
   const editLayers: Record<number, EditLayer> = $state({});
   let editSel: EditSelection | null = $state(null);
   let busy = false;
+
+  // Annotations and form fields
+  const extras = new SvelteMap<number, PageExtras>();
+  const annotLayers: Record<number, AnnotLayer> = $state({});
+  let annotSel: { page: number; id: number } | null = $state(null);
 
   // Non-reactive render bookkeeping.
   const renderedWidth = new Map<number, number>(); // page -> bitmap px width on canvas
@@ -124,11 +148,13 @@
     }
   }
 
-  function loadOverlay(i: number) {
+  function loadOverlay(i: number, refresh = false) {
     if (tool) {
       if (!layouts.has(i)) pageLayout(doc.id, i).then((l) => layouts.set(i, l), console.error);
       return;
     }
+    // On refresh the old data stays until the new arrives, so layers stay mounted.
+    if (refresh || !extras.has(i)) pageExtras(doc.id, i).then((x) => extras.set(i, x), console.error);
     if (!texts.has(i)) pageText(doc.id, i).then((t) => texts.set(i, t), console.error);
     if (!links.has(i)) pageLinks(doc.id, i).then((l) => links.set(i, l), console.error);
   }
@@ -143,7 +169,7 @@
     } catch (e) {
       if (e === STALE) {
         layouts.clear();
-        nearPages.forEach(loadOverlay);
+        nearPages.forEach((i) => loadOverlay(i));
         onerror?.("The page changed before that edit was applied. Please try again.");
       } else {
         onerror?.(String(e));
@@ -156,6 +182,15 @@
 
   /** Keyboard actions for the selected object; returns true if handled. */
   export function handleEditKey(e: KeyboardEvent): boolean {
+    if (annotTool === "select" && annotSel) {
+      const layer = annotLayers[annotSel.page];
+      if (!layer) return false;
+      if (e.key === "Delete" || e.key === "Backspace") layer.deleteSelected();
+      else if (e.key === "Enter") layer.editSelected();
+      else if (e.key === "Escape") annotSel = null;
+      else return false;
+      return true;
+    }
     if (!tool || !editSel) return false;
     const layer = editLayers[editSel.page];
     if (!layer) return false;
@@ -330,9 +365,29 @@
     if (caret) selection = { anchor: selection.anchor, focus: caret };
   }
 
+  /** Highlights/underlines/strikes out the selected text, one annotation per page. */
+  export async function applyMarkup(kind: "highlight" | "underline" | "strikeout", color: Rgb) {
+    if (!selection) return false;
+    const sel = selection;
+    const [a, b] = ordered(sel);
+    for (let p = a.page; p <= b.page; p++) {
+      const t = await pageText(doc.id, p);
+      const range = selectionOnPage(sel, p, t.codes.length);
+      if (!range) continue;
+      const rects = rangeRects(t, range[0], range[1]);
+      if (rects.length) await run(() => addAnnotation(doc.id, p, { type: "markup", kind, rects, color }));
+    }
+    selection = null;
+    return true;
+  }
+
   function onPointerUp() {
     if (!dragging) return;
     dragging = false;
+    if (isMarkup(annotTool) && selection) {
+      applyMarkup(annotTool as "highlight" | "underline" | "strikeout", annotColor);
+      return;
+    }
     if (selection && ordered(selection)[0].page === ordered(selection)[1].page &&
         selection.anchor.index === selection.focus.index) {
       selection = null;
@@ -361,12 +416,14 @@
       texts.clear();
       links.clear();
       layouts.clear();
+      for (const k of [...extras.keys()]) if (!nearPages.has(k)) extras.delete(k);
+      annotSel = null;
       renderedWidth.clear();
       selection = null;
       editSel = null;
       nearPages.forEach((i) => {
         ensureRendered(i);
-        loadOverlay(i);
+        loadOverlay(i, true);
       });
     }
     seenRevision = r;
@@ -376,10 +433,10 @@
   $effect(() => {
     if (tool) {
       selection = null;
-      nearPages.forEach(loadOverlay);
+      nearPages.forEach((i) => loadOverlay(i));
     } else {
       editSel = null;
-      nearPages.forEach(loadOverlay);
+      nearPages.forEach((i) => loadOverlay(i));
     }
   });
 
@@ -447,6 +504,25 @@
           {run}
           ondone={() => ontooldone?.()}
         />
+      {:else if annotTool && !isMarkup(annotTool) && nearPages.has(i) && extras.get(i)}
+        <AnnotLayer
+          bind:this={annotLayers[i]}
+          docId={doc.id}
+          page={i}
+          width={page.width}
+          height={page.height}
+          scale={zoom * PT_TO_PX}
+          revision={extras.get(i)!.revision}
+          annotations={extras.get(i)!.annotations}
+          tool={annotTool}
+          color={annotColor}
+          strokeWidth={annotWidth}
+          {signature}
+          selected={annotSel}
+          onselect={(s) => (annotSel = s)}
+          {run}
+          ondone={() => onannotdone?.()}
+        />
       {:else if !tool && nearPages.has(i)}
         {@const t = texts.get(i)}
         <svg class="overlay" viewBox="0 0 {page.width} {page.height}" preserveAspectRatio="none">
@@ -481,7 +557,24 @@
               <title>{link.uri ?? `Go to page ${(link.page ?? 0) + 1}`}</title>
             </rect>
           {/each}
+          {#each (extras.get(i)?.annotations ?? []).filter((a) => a.contents) as a (a.id)}
+            <rect class="note-tip" x={a.rect[0]} y={a.rect[1]} width={a.rect[2] - a.rect[0]} height={a.rect[3] - a.rect[1]}>
+              <title>{[a.author, a.contents].filter(Boolean).join(": ")}</title>
+            </rect>
+          {/each}
         </svg>
+        {#if !annotTool && extras.get(i)?.fields.length}
+          <FormLayer
+            docId={doc.id}
+            page={i}
+            width={page.width}
+            height={page.height}
+            scale={zoom * PT_TO_PX}
+            revision={extras.get(i)!.revision}
+            fields={extras.get(i)!.fields}
+            {run}
+          />
+        {/if}
       {/if}
     </div>
   {/each}
@@ -534,5 +627,8 @@
   }
   .link:hover {
     fill: rgb(47 111 222 / 0.1);
+  }
+  .note-tip {
+    fill: transparent;
   }
 </style>

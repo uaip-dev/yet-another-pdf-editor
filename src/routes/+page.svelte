@@ -9,6 +9,8 @@
   import Outline from "$lib/Outline.svelte";
   import Icon from "$lib/Icon.svelte";
   import type { Tool } from "$lib/EditLayer.svelte";
+  import type { AnnotTool, Signature } from "$lib/AnnotLayer.svelte";
+  import SignatureDialog from "$lib/SignatureDialog.svelte";
   import { printDocument } from "$lib/print";
   import {
     closeDocument,
@@ -26,6 +28,7 @@
     type DocInfo,
     type DocState,
     type NewTextStyle,
+    hexToRgb,
     type OutlineItem,
     type SearchHit,
   } from "$lib/api";
@@ -66,6 +69,52 @@
   let newTextStyle: NewTextStyle = $state({ size: 12, family: "sans-serif", bold: false, italic: false, color: [0, 0, 0] });
   let newTextColor = $state("#000000");
   const anyDirty = $derived(tabs.some((t) => t.dirty));
+
+  // Comments (annotations)
+  let annotTool: AnnotTool | null = $state(null);
+  const COLORS = ["#ffd400", "#7ad151", "#4fc3f7", "#ff8ac2", "#e0262f", "#1e5eff", "#1a1a1a"];
+  let toolColors: Record<string, string> = $state({
+    highlight: "#ffd400",
+    underline: "#1e5eff",
+    strikeout: "#e0262f",
+    note: "#ffd400",
+    pen: "#e0262f",
+    rectangle: "#1e5eff",
+    ellipse: "#1e5eff",
+  });
+  let annotWidth = $state(2);
+  let signature: Signature | null = $state(null);
+  let signatureDialog = $state(false);
+  const annotColor = $derived(hexToRgb(toolColors[annotTool ?? ""] ?? "#ffd400"));
+
+  function setMode(mode: "edit" | "comment" | null) {
+    tool = mode === "edit" ? "edit" : null;
+    annotTool = mode === "comment" ? "select" : null;
+  }
+
+  async function pickAnnotTool(t: AnnotTool) {
+    if (t === "signature") {
+      signatureDialog = true;
+      return;
+    }
+    annotTool = t;
+    // Like Acrobat: text already selected gets marked up right away.
+    if ((t === "highlight" || t === "underline" || t === "strikeout") && view?.hasSelection()) {
+      await view.applyMarkup(t, hexToRgb(toolColors[t]));
+    }
+  }
+
+  const ANNOT_TOOLS: { id: AnnotTool; icon: import("$lib/Icon.svelte").IconName; label: string }[] = [
+    { id: "select", icon: "pointer", label: "Select" },
+    { id: "highlight", icon: "highlight", label: "Highlight" },
+    { id: "underline", icon: "underline", label: "Underline" },
+    { id: "strikeout", icon: "strike", label: "Strikethrough" },
+    { id: "note", icon: "note", label: "Note" },
+    { id: "pen", icon: "pen", label: "Draw" },
+    { id: "rectangle", icon: "square", label: "Rectangle" },
+    { id: "ellipse", icon: "circle", label: "Ellipse" },
+    { id: "signature", icon: "signature", label: "Sign" },
+  ];
   let dragging = $state(false);
   let recent = $state(recentFiles());
 
@@ -339,8 +388,12 @@
   function onKey(e: KeyboardEvent) {
     const typing = (e.target as HTMLElement)?.closest?.("input, select, textarea");
     const mod = e.ctrlKey || e.metaKey;
-    if (tool && !typing && !mod && view?.handleEditKey(e)) {
+    if ((tool || annotTool) && !typing && !mod && view?.handleEditKey(e)) {
       e.preventDefault();
+      return;
+    }
+    if (annotTool && annotTool !== "select" && e.key === "Escape" && !typing) {
+      annotTool = "select";
       return;
     }
     if (tab && mod && !typing) {
@@ -364,7 +417,7 @@
     }
     if (tab && mod && e.key.toLowerCase() === "e") {
       e.preventDefault();
-      tool = tool ? null : "edit";
+      setMode(tool ? null : "edit");
       return;
     }
     if (e.key === "F3") {
@@ -490,8 +543,11 @@ ${t.doc.path}` : t.doc.path}>
         <Icon name="print" />
       </button>
       <span class="sep"></span>
-      <button class="edit-toggle" class:on={!!tool} onclick={() => (tool = tool ? null : "edit")} title="Edit text and images (Ctrl+E)">
+      <button class="edit-toggle" class:on={!!tool} onclick={() => setMode(tool ? null : "edit")} title="Edit text and images (Ctrl+E)">
         <Icon name="edit" size={16} />Edit
+      </button>
+      <button class="edit-toggle" class:on={!!annotTool} onclick={() => setMode(annotTool ? null : "comment")} title="Comment, highlight, draw and sign">
+        <Icon name="comment" size={16} />Comment
       </button>
       <button class="icon-btn" onclick={() => changeDoc(tab, () => undoApi(tab.doc.id))} disabled={!tab.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
         <Icon name="undo" />
@@ -598,6 +654,43 @@ ${t.doc.path}` : t.doc.path}>
     </div>
   {/if}
 
+  {#if tab && annotTool}
+    <div class="edit-bar" role="toolbar" aria-label="Comment tools">
+      {#each ANNOT_TOOLS as t}
+        <button class="tool" class:on={annotTool === t.id} onclick={() => pickAnnotTool(t.id)} title={t.label}>
+          <Icon name={t.icon} size={16} /><span class="tool-label">{t.label}</span>
+        </button>
+      {/each}
+      {#if annotTool !== "select" && annotTool !== "signature"}
+        <span class="sep"></span>
+        {#each COLORS as c}
+          <button
+            class="swatch"
+            class:on={toolColors[annotTool] === c}
+            style:background={c}
+            onclick={() => (toolColors[annotTool!] = c)}
+            aria-label="Colour {c}"
+          ></button>
+        {/each}
+        {#if annotTool === "pen" || annotTool === "rectangle" || annotTool === "ellipse"}
+          <select bind:value={annotWidth} aria-label="Line width">
+            <option value={1}>Thin</option>
+            <option value={2}>Medium</option>
+            <option value={4}>Thick</option>
+          </select>
+        {/if}
+      {/if}
+      <span class="hint muted">
+        {#if annotTool === "select"}Click a comment to select · drag to move · Del deletes · double-click a note to edit
+        {:else if annotTool === "highlight" || annotTool === "underline" || annotTool === "strikeout"}Drag across text
+        {:else if annotTool === "note"}Click where the note should go
+        {:else if annotTool === "pen"}Draw on the page · strokes made together become one drawing
+        {:else if annotTool === "signature"}Click where the signature should go · Esc to cancel
+        {:else}Drag on the page to draw{/if}
+      </span>
+    </div>
+  {/if}
+
   {#if notice}
     <div class="notice" role="status">
       {notice}
@@ -650,6 +743,11 @@ ${t.doc.path}` : t.doc.path}>
             onstate={(s) => applyState(t, s)}
             onerror={(m) => (error = m)}
             ontooldone={() => (tool = "edit")}
+            annotTool={t.key === activeKey ? annotTool : null}
+            {annotColor}
+            {annotWidth}
+            {signature}
+            onannotdone={() => (annotTool = "select")}
             bind:this={views[t.key]}
           />
         </div>
@@ -697,6 +795,18 @@ ${t.doc.path}` : t.doc.path}>
       </div>
     </div>
   </div>
+{/if}
+
+{#if signatureDialog}
+  <SignatureDialog
+    onpick={(sig) => {
+      signature = sig;
+      signatureDialog = false;
+      tool = null;
+      annotTool = "signature";
+    }}
+    oncancel={() => (signatureDialog = false)}
+  />
 {/if}
 
 {#if passwordFor}
@@ -835,7 +945,7 @@ ${t.doc.path}` : t.doc.path}>
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 6%, var(--bg));
     flex: none;
-    overflow-x: auto;
+    overflow: hidden;
   }
   .tool {
     display: inline-flex;
@@ -849,6 +959,23 @@ ${t.doc.path}` : t.doc.path}>
     background: var(--btn);
     border-color: var(--border);
     color: var(--accent);
+  }
+  .swatch {
+    width: 20px;
+    height: 20px;
+    min-height: 0;
+    padding: 0;
+    border-radius: 50%;
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  .swatch.on {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  @media (max-width: 1400px) {
+    .tool-label {
+      display: none;
+    }
   }
   .edit-bar .size {
     width: 4.2em;
@@ -865,6 +992,9 @@ ${t.doc.path}` : t.doc.path}>
     margin-left: 10px;
     font-size: 12px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .notice {
     padding: 8px 12px;

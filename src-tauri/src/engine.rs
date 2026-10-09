@@ -1210,6 +1210,7 @@ mod tests {
         assert_eq!(by("country").options, ["Malaysia", "Singapore", "Indonesia"]);
         let radios: Vec<_> = x.fields.iter().filter(|f| f.kind == "radio").collect();
         assert_eq!(radios.len(), 3);
+        assert!(radios.iter().all(|r| !r.checked), "no radio selected initially");
 
         use forms::FieldValue;
         let changes = vec![
@@ -1262,3 +1263,4 @@ mod tests {
         assert!((im.rect[2] - im.rect[0] - 150.0).abs() < 0.5 && (im.rect[3] - im.rect[1] - 150.0).abs() < 0.5);
     }
 }
+

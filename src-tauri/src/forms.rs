@@ -72,7 +72,12 @@ pub fn list(page: &PdfPage, geom: &Geom) -> Vec<FieldInfo> {
             }
             PdfFormFieldType::RadioButton => {
                 info.kind = "radio";
-                info.checked = field.as_radio_button_field().and_then(|f| f.is_checked().ok()).unwrap_or(false);
+                // pdfium-render's is_checked() reports unselected radios as checked
+                // (it compares two missing values). A radio is on when its group
+                // value names this widget's current appearance state.
+                info.checked = field.as_radio_button_field().is_some_and(|f| {
+                    matches!((f.group_value(), field.appearance_stream()), (Some(v), Some(state)) if v == state && v != "Off")
+                });
             }
             PdfFormFieldType::ComboBox | PdfFormFieldType::ListBox => {
                 let (kind, value, opts) = if let Some(f) = field.as_combo_box_field() {

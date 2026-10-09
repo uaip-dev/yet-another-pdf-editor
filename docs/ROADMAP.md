@@ -19,8 +19,8 @@ Editing text and images is the selling point, so it comes right after the viewer
 | 0 | Project setup, PDFium binding, render pages, open/drag-drop, password PDFs, zoom | **done** |
 | 1 | Viewer: thumbnails, outline, text select/copy, search, links, print, recent files, file association, tabs | **done** |
 | 2 | **Editing:** edit existing text, add text, replace/move/resize/delete/add images, undo/redo, save/save-as | **done** |
-| 3 | Annotations and forms: highlight, underline, strikeout, notes, ink, shapes, stamps, AcroForm fill, signatures | next |
-| 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | |
+| 3 | Annotations and forms: highlight, underline, strikeout, notes, ink, shapes, AcroForm fill, signatures | **done** |
+| 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | next |
 | 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | |
 | Later | OCR (Tesseract), digital certificate signatures, compare | |
 
@@ -51,6 +51,32 @@ Code: `src-tauri/src/edit.rs`.
 - The inline editor previews with a generic font of the same family, not the embedded font.
 - pdfium-render 0.8.37 double-destroys removed page objects, so they are leaked deliberately
   (`mem::forget`), a few hundred bytes per removed glyph per session.
+
+## Annotations, forms and signatures (Phase 3)
+Code: `src-tauri/src/annots.rs`, `src-tauri/src/forms.rs`.
+
+- **New annotations** are written with lopdf as an *incremental update*: the existing bytes are
+  kept and only the annotation, its appearance stream and the updated page/`Annots` objects are
+  appended. Each annotation is an indirect object with an explicit appearance (multiply-blended
+  highlight, underline/strikeout lines, note icon, ink, rectangle, ellipse), so every viewer draws
+  it the same. PDFium is not used to create them: it writes annotations as direct dictionaries
+  (the spec requires indirect references; MuPDF ignores direct ones) and generates no appearance
+  for text markup or notes.
+- Listing, moving, editing note text and deleting use PDFium.
+- **Forms** are listed via pdfium-render and filled through PDFium's form-fill engine (`FORM_*`)
+  on a raw copy of the document, like a real viewer: parent/kid fields and widget appearances are
+  updated, so filled values show in every viewer.
+- **Signatures** are drawn, typed (handwriting fonts) or loaded from an image (with optional
+  white-background removal), trimmed, and placed as an image with transparency. Up to five are
+  remembered on the computer.
+
+### Known limits
+- Annotations can't be added to password-protected PDFs yet (lopdf can't update them incrementally).
+- Text markup can't be moved (it belongs to its text); delete and re-create instead.
+- Form calculation/format scripts (JavaScript) are not run.
+- Signatures are visual (an image), not cryptographic digital signatures.
+- pdfium-render bugs worked around: annotation colour getters crash PDFium on annotations with
+  appearance streams (not used); radio buttons report "checked" when unselected (own check).
 
 ## Performance targets
 - Cold start < 1 s; first page < 300 ms; < 150 MB RAM with a 100-page document open.

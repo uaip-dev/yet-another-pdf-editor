@@ -22,6 +22,15 @@
     trash: "M3 6h18M8 6V4h8v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14M10 11v6M14 11v6",
     replace: "M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5",
     pointer: "M4 4l7 17 2.5-7.5L21 11z",
+    comment: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+    highlight: "M9 11l-6 6v3h9l3-3M22 12l-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4",
+    underline: "M6 4v6a6 6 0 0 0 12 0V4M4 20h16",
+    strike: "M16 4H9a3 3 0 0 0-2.83 4M14 12a4 4 0 0 1 0 8H6M4 12h16",
+    note: "M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5zM15 3v6h6M8 13h8M8 17h5",
+    pen: "M3 17c3-3 5-1 7 1s4 3 7-1M14.5 4.5l5 5L12 17H7v-5z",
+    square: "M4 4h16v16H4z",
+    circle: "M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18z",
+    signature: "M3 17c2.5 0 4-6 6-6s1 6 3 6 2-3 3.5-3 1.5 3 3 3h2.5M3 21h18",
   } as const;
   export type IconName = keyof typeof PATHS;
 </script>

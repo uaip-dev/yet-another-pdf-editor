@@ -149,8 +149,16 @@ async fn replace_image(
 }
 
 #[tauri::command]
-async fn add_image(engine: State<'_, Engine>, id: DocId, page: u16, x: f32, y: f32, path: String) -> Result<DocState, String> {
-    engine.add_image(id, page, (x, y), edit::ImageSource::Path(path), None).await
+async fn add_image(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    x: f32,
+    y: f32,
+    path: String,
+    width: Option<f32>,
+) -> Result<DocState, String> {
+    engine.add_image(id, page, (x, y), edit::ImageSource::Path(path), width).await
 }
 
 /// Places a signature (PNG bytes drawn or typed in the UI) as page content.
@@ -216,6 +224,18 @@ async fn redo(engine: State<'_, Engine>, id: DocId) -> Result<DocState, String> 
 async fn save_document(app: AppHandle, engine: State<'_, Engine>, id: DocId, path: Option<String>) -> Result<DocState, String> {
     let backups = app.path().app_local_data_dir().ok().map(|d| d.join("backups"));
     engine.save(id, path, backups).await
+}
+
+/// Reads an image file the user picked (e.g. a scanned signature) so the UI
+/// can preview and prepare it. Only image types are allowed.
+#[tauri::command]
+async fn read_image_file(path: String) -> Result<Response, String> {
+    let lower = path.to_lowercase();
+    let ok = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"].iter().any(|e| lower.ends_with(e));
+    if !ok {
+        return Err("Not an image file".into());
+    }
+    std::fs::read(&path).map(Response::new).map_err(|e| e.to_string())
 }
 
 /// Returns (once) the PDFs the app was launched with.
@@ -294,7 +314,8 @@ pub fn run() {
             page_extras,
             add_annotation,
             change_annotation,
-            fill_fields
+            fill_fields,
+            read_image_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

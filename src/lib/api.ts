@@ -215,7 +215,12 @@ export function replaceImage(id: number, page: number, revision: number, index: 
 }
 
 export function addImage(id: number, page: number, x: number, y: number, path: string): Promise<DocState> {
-  return invoke<DocState>("add_image", { id, page, x, y, path });
+  return invoke<DocState>("add_image", { id, page, x, y, path, width: null });
+}
+
+/** Adds an image file scaled to `width` points (aspect kept). */
+export function addImageSized(id: number, page: number, x: number, y: number, path: string, width: number): Promise<DocState> {
+  return invoke<DocState>("add_image", { id, page, x, y, path, width });
 }
 
 export function undo(id: number): Promise<DocState> {
@@ -236,3 +241,78 @@ export function invalidateText(id: number) {
 }
 
 export const IMAGE_FILTERS = [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "bmp", "webp"] }];
+
+// ---- Annotations, forms, signatures ----
+
+export interface AnnotInfo {
+  id: number;
+  kind: string;
+  rect: Rect4;
+  color: string;
+  contents: string;
+  author: string;
+  movable: boolean;
+}
+
+export interface FieldInfo {
+  id: number;
+  kind: "text" | "checkbox" | "radio" | "combo" | "list" | "button" | "signature" | "unknown";
+  name: string;
+  value: string;
+  checked: boolean;
+  options: string[];
+  selected: number | null;
+  rect: Rect4;
+  readOnly: boolean;
+  multiline: boolean;
+  password: boolean;
+}
+
+export interface PageExtras {
+  revision: number;
+  annotations: AnnotInfo[];
+  fields: FieldInfo[];
+}
+
+export type Rgb = [number, number, number];
+export type MarkupKind = "highlight" | "underline" | "strikeout";
+
+export type NewAnnot =
+  | { type: "markup"; kind: MarkupKind; rects: Rect4[]; color: Rgb }
+  | { type: "note"; at: [number, number]; text: string; color: Rgb }
+  | { type: "ink"; strokes: [number, number][][]; color: Rgb; width: number }
+  | { type: "shape"; kind: "rectangle" | "ellipse"; rect: Rect4; color: Rgb; width: number };
+
+export type AnnotChange = { type: "rect"; value: Rect4 } | { type: "contents"; value: string } | { type: "delete" };
+
+export type FieldValue = { type: "text"; value: string } | { type: "checked"; value: boolean } | { type: "select"; value: number };
+
+export function pageExtras(id: number, page: number): Promise<PageExtras> {
+  return invoke<PageExtras>("page_extras", { id, page });
+}
+
+export function addAnnotation(id: number, page: number, annot: NewAnnot): Promise<DocState> {
+  return invoke<DocState>("add_annotation", { id, page, annot });
+}
+
+export function changeAnnotation(id: number, page: number, revision: number, annot: number, change: AnnotChange): Promise<DocState> {
+  return invoke<DocState>("change_annotation", { id, page, revision, annot, change });
+}
+
+export function fillFields(id: number, page: number, revision: number, changes: [number, FieldValue][]): Promise<DocState> {
+  return invoke<DocState>("fill_fields", { id, page, revision, changes });
+}
+
+export function addSignature(id: number, page: number, x: number, y: number, png: Uint8Array, width: number): Promise<DocState> {
+  return invoke<DocState>("add_signature", { id, page, x, y, png: Array.from(png), width });
+}
+
+export function hexToRgb(hex: string): Rgb {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+export async function readImageFile(path: string): Promise<Blob> {
+  const buf = await invoke<ArrayBuffer>("read_image_file", { path });
+  return new Blob([buf]);
+}

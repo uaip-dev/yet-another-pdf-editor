@@ -10,6 +10,8 @@ It's built with Tauri 2, Svelte 5 and PDFium. See [docs/ROADMAP.md](docs/ROADMAP
   password-protected PDFs, recent files, opens `.pdf` files from Explorer
 - **Edit (Ctrl+E):** double-click text to edit it in place (keeps the original fonts where possible),
   move/delete text blocks, add text, replace/move/resize/delete/add images
+- **Comment:** highlight, underline, strikethrough, sticky notes, freehand pen, rectangles, ellipses
+- **Fill & sign:** fill form fields (text, checkboxes, radio buttons, drop-downs); draw, type or upload a signature
 - **Undo/redo** (Ctrl+Z / Ctrl+Y), **save** (Ctrl+S) and **save as** (Ctrl+Shift+S), with automatic backups
 
 ## Prerequisites (Windows)
