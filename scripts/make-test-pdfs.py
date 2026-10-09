@@ -86,3 +86,19 @@ c.drawString(72, 540, "Country:")
 f.choice(name="country", options=["Malaysia", "Singapore", "Indonesia"], value="Malaysia", x=150, y=532, width=150, height=20)
 c.save()
 print("wrote form.pdf")
+
+# Over-resolution photo for compression tests (noise + gradient, compresses poorly as Flate)
+import random
+random.seed(1)
+big = Image.new("RGB", (3000, 3000))
+px = big.load()
+for y in range(0, 3000, 2):
+    for x in range(0, 3000, 2):
+        c = ((x * 255) // 3000, (y * 255) // 3000, random.randrange(256))
+        px[x, y] = px[x + 1, y] = px[x, y + 1] = px[x + 1, y + 1] = c
+big.save(out / "big-photo.png")
+c = canvas.Canvas(str(out / "big-image.pdf"), pagesize=A4)
+c.drawString(72, 780, "Big image test")
+c.drawImage(str(out / "big-photo.png"), 72, 500, width=200, height=200)
+c.save()
+print("wrote big-image.pdf")

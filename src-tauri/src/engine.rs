@@ -7,7 +7,7 @@
 //! All coordinates handed to the UI are in PDF points with a top-left origin,
 //! in the page's displayed orientation (after /Rotate and the crop box).
 
-use crate::{annots, edit, forms, pages};
+use crate::{annots, docops, edit, forms, pages};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -177,6 +177,8 @@ struct OpenDoc<'a> {
     doc: PdfDocument<'a>,
     path: String,
     password: Option<String>,
+    /// Encryption to apply when saving (the open document is kept decrypted).
+    protection: Option<docops::Protection>,
     text: HashMap<u16, Arc<PageText>>,
     models: HashMap<u16, Arc<edit::PageModel>>,
     fonts: edit::Fonts,
@@ -388,7 +390,23 @@ impl Engine {
         self.run(move |docs| {
             // Read into memory so the file is never locked and can be saved over.
             let bytes = std::fs::read(Path::new(&path)).map_err(|e| format!("{e}"))?;
-            let doc = docs.pdfium.load_pdf_from_byte_vec(bytes, password.as_deref()).map_err(err)?;
+            let mut doc = docs.pdfium.load_pdf_from_byte_vec(bytes.clone(), password.as_deref()).map_err(err)?;
+            // Password-protected: work on a decrypted copy so every feature works,
+            // and encrypt again on save. If lopdf can't decrypt it, keep PDFium's view.
+            let mut protection = None;
+            let encrypted = !matches!(doc.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected));
+            if encrypted {
+                match docops::decrypt(&bytes, password.as_deref().unwrap_or("")) {
+                    Ok((plain, p)) => match docs.pdfium.load_pdf_from_byte_vec(plain, None) {
+                        Ok(d) => {
+                            doc = d;
+                            protection = Some(p);
+                        }
+                        Err(e) => log::warn!("decrypted copy did not load: {e:?}"),
+                    },
+                    Err(e) => log::warn!("could not decrypt for editing: {e}"),
+                }
+            }
             let id = docs.next_id;
             docs.next_id += 1;
             let info = doc_info(id, &path, &doc);
@@ -398,6 +416,7 @@ impl Engine {
                     doc,
                     path,
                     password,
+                    protection,
                     text: HashMap::new(),
                     models: HashMap::new(),
                     fonts: edit::Fonts::default(),
@@ -724,6 +743,75 @@ impl Engine {
         .await
     }
 
+    pub async fn properties(&self, id: DocId) -> Result<docops::Properties, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            Ok(docops::properties(&d.doc, &d.path, d.protection.as_ref().is_some_and(|p| !p.user_password.is_empty())))
+        })
+        .await
+    }
+
+    pub async fn set_properties(&self, id: DocId, props: docops::Properties) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let current = d.doc.save_to_bytes().map_err(err)?;
+            let updated = docops::set_properties(&current, &props)?;
+            d.push_undo(current);
+            d.reload(pdfium, updated)?;
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn protection(&self, id: DocId) -> Result<Option<docops::Protection>, String> {
+        self.run(move |docs| Ok(docs.get(id)?.protection.clone())).await
+    }
+
+    /// Sets (or with None removes) the password protection applied on save.
+    pub async fn set_protection(&self, id: DocId, protection: Option<docops::Protection>) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.protection = protection;
+            d.dirty = true;
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn export_images(
+        &self,
+        id: DocId,
+        list: Vec<u16>,
+        dpi: f32,
+        format: docops::ImageFormat,
+        dir: String,
+    ) -> Result<Vec<String>, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let stem = Path::new(&d.path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "page".into());
+            docops::export_images(&d.doc, &list, dpi, format, Path::new(&dir), &stem)
+        })
+        .await
+    }
+
+    /// Downsamples large images and repacks the file; undoable.
+    pub async fn compress(&self, id: DocId, max_dpi: f32, quality: u8) -> Result<(DocState, docops::CompressReport), String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let before = d.doc.save_to_bytes().map_err(err)?;
+            let images = docops::downsample_images(&d.doc, max_dpi, quality)?;
+            let resampled = d.doc.save_to_bytes().map_err(err)?;
+            let packed = docops::repack(&resampled)?;
+            let report = docops::CompressReport { before: before.len() as u64, after: packed.len() as u64, images_resampled: images };
+            d.push_undo(before);
+            d.reload(pdfium, packed)?;
+            Ok((d.state_with_pages(), report))
+        })
+        .await
+    }
+
     /// Saves to `path` (or the document's own path). Writes a temp file and
     /// renames it over the target so a failed save never corrupts the file.
     /// The existing file is first copied to `backup_dir`.
@@ -731,7 +819,10 @@ impl Engine {
         self.run(move |docs| {
             let d = docs.get(id)?;
             let target = path.unwrap_or_else(|| d.path.clone());
-            let bytes = d.doc.save_to_bytes().map_err(err)?;
+            let mut bytes = d.doc.save_to_bytes().map_err(err)?;
+            if let Some(p) = &d.protection {
+                bytes = docops::encrypt(&bytes, p)?;
+            }
             let target_path = Path::new(&target);
             if let (Some(dir), true) = (backup_dir, target_path.exists()) {
                 backup(&dir, target_path);
@@ -1463,5 +1554,98 @@ mod tests {
         let last = e.open(files[2].clone(), None).await.unwrap();
         assert_eq!(last.pages.len(), 40);
         assert_eq!(first_line(&e, last.id, 0).await, "Page 161");
+    }
+
+    #[tokio::test]
+    async fn export_pages_as_images() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let dir = temp_path("export");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = e
+            .export_images(doc.id, vec![0, 3], 150.0, docops::ImageFormat::Png, dir.to_string_lossy().into())
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("multipage - page 1.png"));
+        assert_eq!(image::image_dimensions(&files[0]).unwrap().0, 1240, "A4 at 150 dpi");
+        let (w, h) = image::image_dimensions(&files[1]).unwrap();
+        assert!(w > h, "landscape page 4");
+        let jpg = e.export_images(doc.id, vec![1], 72.0, docops::ImageFormat::Jpeg, dir.to_string_lossy().into()).await.unwrap();
+        assert!(jpg[0].ends_with(".jpg") && image::image_dimensions(&jpg[0]).unwrap().0 == 595);
+    }
+
+    #[tokio::test]
+    async fn edit_document_properties() {
+        let Some(path) = corpus("letter.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let mut p = e.properties(doc.id).await.unwrap();
+        assert_eq!(p.page_count, 1);
+        assert!(p.page_size.contains("Letter"), "{}", p.page_size);
+        p.title = "Laporan Tahunan".into();
+        p.author = "Siti Aminah".into();
+        p.keywords = "laporan, 2026".into();
+        e.set_properties(doc.id, p).await.unwrap();
+        let out = temp_path("props.pdf");
+        e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
+        let re = e.open(out.to_string_lossy().into(), None).await.unwrap();
+        assert_eq!(re.title.as_deref(), Some("Laporan Tahunan"));
+        let q = e.properties(re.id).await.unwrap();
+        assert_eq!((q.author.as_str(), q.keywords.as_str()), ("Siti Aminah", "laporan, 2026"));
+    }
+
+    #[tokio::test]
+    async fn password_protect_and_edit_protected_documents() {
+        let (Some(plain), Some(locked)) = (corpus("letter.pdf"), corpus("encrypted-password-test.pdf")) else { return };
+        let e = engine();
+
+        // Protect a plain document; it needs the password afterwards.
+        let doc = e.open(plain, None).await.unwrap();
+        let prot = docops::Protection { user_password: "rahsia".into(), allow_print: true, ..Default::default() };
+        e.set_protection(doc.id, Some(prot)).await.unwrap();
+        let out = temp_path("protected.pdf");
+        e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
+        let out = out.to_string_lossy().into_owned();
+        assert_eq!(e.open(out.clone(), None).await.err().as_deref(), Some(ERR_PASSWORD));
+        assert_eq!(e.open(out.clone(), Some("salah".into())).await.err().as_deref(), Some(ERR_PASSWORD));
+        let re = e.open(out.clone(), Some("rahsia".into())).await.unwrap();
+        assert!(e.properties(re.id).await.unwrap().protected);
+
+        // A protected document (RC4, from pypdf) can be annotated and stays protected.
+        let doc = e.open(locked, Some("test".into())).await.unwrap();
+        e.add_annotation(doc.id, 0, annots::NewAnnot::Note { at: (50.0, 50.0), text: "ok".into(), color: [255, 210, 0] })
+            .await
+            .expect("annotations work on decrypted copy");
+        e.move_pages(doc.id, vec![0], 1).await.expect("lopdf features work too");
+        let out2 = temp_path("protected-annotated.pdf").to_string_lossy().into_owned();
+        e.save(doc.id, Some(out2.clone()), None).await.unwrap();
+        assert_eq!(e.open(out2.clone(), None).await.err().as_deref(), Some(ERR_PASSWORD));
+        let re = e.open(out2, Some("test".into())).await.unwrap();
+        assert_eq!(e.page_extras(re.id, 0).await.unwrap().annotations.len(), 1);
+
+        // Removing the protection saves an open file.
+        e.set_protection(re.id, None).await.unwrap();
+        let out3 = temp_path("unprotected.pdf").to_string_lossy().into_owned();
+        e.save(re.id, Some(out3.clone()), None).await.unwrap();
+        assert!(e.open(out3, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn compress_downsamples_large_images() {
+        let Some(path) = corpus("big-image.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let (st, report) = e.compress(doc.id, 150.0, 75).await.unwrap();
+        assert_eq!(report.images_resampled, 1);
+        assert!(report.after * 5 < report.before, "{} -> {}", report.before, report.after);
+        assert!(st.dirty && st.can_undo);
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let im = &layout.images[0];
+        assert!(im.width < 500 && im.width > 300, "~150 dpi for 200pt: {}", im.width);
+        assert!((im.rect[2] - im.rect[0] - 200.0).abs() < 0.5, "placement kept");
+        assert!(page_string(&e.page_text(doc.id, 0).await.unwrap()).contains("Big image test"));
     }
 }

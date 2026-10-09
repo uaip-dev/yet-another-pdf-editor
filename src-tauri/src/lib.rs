@@ -1,4 +1,5 @@
 mod annots;
+mod docops;
 mod edit;
 mod engine;
 mod forms;
@@ -285,6 +286,55 @@ async fn split_document(engine: State<'_, Engine>, id: DocId, every: u16, dir: S
     engine.split(id, every, dir).await
 }
 
+#[tauri::command]
+async fn document_properties(engine: State<'_, Engine>, id: DocId) -> Result<docops::Properties, String> {
+    engine.properties(id).await
+}
+
+#[tauri::command]
+async fn set_document_properties(engine: State<'_, Engine>, id: DocId, props: docops::Properties) -> Result<DocState, String> {
+    engine.set_properties(id, props).await
+}
+
+#[tauri::command]
+async fn document_protection(engine: State<'_, Engine>, id: DocId) -> Result<Option<docops::Protection>, String> {
+    engine.protection(id).await
+}
+
+#[tauri::command]
+async fn set_document_protection(
+    engine: State<'_, Engine>,
+    id: DocId,
+    protection: Option<docops::Protection>,
+) -> Result<DocState, String> {
+    engine.set_protection(id, protection).await
+}
+
+#[tauri::command]
+async fn export_images(
+    engine: State<'_, Engine>,
+    id: DocId,
+    pages: Vec<u16>,
+    dpi: f32,
+    format: docops::ImageFormat,
+    dir: String,
+) -> Result<Vec<String>, String> {
+    engine.export_images(id, pages, dpi, format, dir).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressResponse {
+    state: DocState,
+    report: docops::CompressReport,
+}
+
+#[tauri::command]
+async fn compress_document(engine: State<'_, Engine>, id: DocId, max_dpi: f32, quality: u8) -> Result<CompressResponse, String> {
+    let (state, report) = engine.compress(id, max_dpi, quality).await?;
+    Ok(CompressResponse { state, report })
+}
+
 /// Returns (once) the PDFs the app was launched with.
 #[tauri::command]
 fn take_startup_files(files: State<'_, StartupFiles>) -> Vec<String> {
@@ -370,7 +420,13 @@ pub fn run() {
             insert_pages_from_file,
             insert_image_page,
             extract_pages,
-            split_document
+            split_document,
+            document_properties,
+            set_document_properties,
+            document_protection,
+            set_document_protection,
+            export_images,
+            compress_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

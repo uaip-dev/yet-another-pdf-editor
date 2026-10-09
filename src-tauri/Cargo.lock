@@ -5338,6 +5338,7 @@ name = "yet-another-pdf-editor"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "getrandom 0.4.3",
  "image",
  "log",
  "lopdf",
