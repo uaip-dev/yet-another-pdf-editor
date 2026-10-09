@@ -26,6 +26,8 @@ export interface ExtensionContext {
   onerror: (message: string) => void;
   /** Re-reads capabilities (e.g. after a license is activated) so the UI updates. */
   reloadCapabilities: () => Promise<void>;
+  /** Opens PDF files in tabs (or switches to them if already open). */
+  openFiles: (paths: string[]) => Promise<void>;
 }
 
 export function capabilities(): Promise<string[]> {

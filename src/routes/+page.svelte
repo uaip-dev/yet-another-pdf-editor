@@ -460,6 +460,9 @@
     reloadCapabilities: async () => {
       caps = await loadCapabilities();
     },
+    openFiles: async (paths) => {
+      for (const p of paths) await load(p);
+    },
   });
 
   // ---- Document dialogs, More menu, redaction ----
