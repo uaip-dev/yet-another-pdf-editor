@@ -7,7 +7,7 @@
 //! All coordinates handed to the UI are in PDF points with a top-left origin,
 //! in the page's displayed orientation (after /Rotate and the crop box).
 
-use crate::{annots, edit, forms};
+use crate::{annots, edit, forms, pages};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -199,6 +199,8 @@ pub struct DocState {
     /// Characters drawn with a substitute font by the last edit.
     pub substituted: String,
     pub path: String,
+    /// The page list, when the change may have altered it (page operations, undo/redo).
+    pub pages: Option<Vec<PageInfo>>,
 }
 
 /// Annotations and form fields of one page.
@@ -240,7 +242,35 @@ impl<'a> OpenDoc<'a> {
             can_redo: !self.redo.is_empty(),
             substituted,
             path: self.path.clone(),
+            pages: None,
         }
+    }
+
+    /// State including the current page list.
+    fn state_with_pages(&self) -> DocState {
+        let mut s = self.state(String::new());
+        s.pages = Some(page_infos(&self.doc));
+        s
+    }
+
+    /// Runs a page operation with undo and returns the new page list.
+    fn page_op(
+        &mut self,
+        pdfium: &'a Pdfium,
+        op: impl FnOnce(&mut PdfDocument<'a>) -> Result<(), String>,
+    ) -> Result<DocState, String> {
+        self.snapshot()?;
+        if let Err(e) = op(&mut self.doc) {
+            // Roll back a half-applied operation to the snapshot just taken.
+            if let Some(bytes) = self.undo.pop() {
+                let dirty = self.dirty;
+                let _ = self.reload(pdfium, bytes);
+                self.dirty = dirty;
+            }
+            return Err(e);
+        }
+        self.changed();
+        Ok(self.state_with_pages())
     }
 
     fn model(&mut self, page: u16) -> Result<Arc<edit::PageModel>, String> {
@@ -617,7 +647,79 @@ impl Engine {
                 d.redo.push(current)
             }
             d.reload(pdfium, bytes)?;
-            Ok(d.state(String::new()))
+            Ok(d.state_with_pages())
+        })
+        .await
+    }
+
+    pub async fn rotate_pages(&self, id: DocId, list: Vec<u16>, delta: i32) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            docs.get(id)?.page_op(pdfium, |doc| pages::rotate(doc, &list, delta))
+        })
+        .await
+    }
+
+    pub async fn delete_pages(&self, id: DocId, list: Vec<u16>) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            docs.get(id)?.page_op(pdfium, |doc| pages::delete(doc, &list))
+        })
+        .await
+    }
+
+    pub async fn insert_blank_page(&self, id: DocId, at: u16, width: f32, height: f32) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            docs.get(id)?.page_op(pdfium, |doc| pages::insert_blank(doc, at, width, height))
+        })
+        .await
+    }
+
+    pub async fn insert_pages_from_file(&self, id: DocId, at: u16, path: String, password: Option<String>) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            docs.get(id)?.page_op(pdfium, |doc| pages::insert_file(pdfium, doc, at, &path, password.as_deref()).map(|_| ()))
+        })
+        .await
+    }
+
+    pub async fn insert_image_page(&self, id: DocId, at: u16, path: String) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            docs.get(id)?.page_op(pdfium, |doc| pages::insert_image_page(doc, at, &path))
+        })
+        .await
+    }
+
+    /// Moves pages so they sit before original index `before`.
+    pub async fn move_pages(&self, id: DocId, list: Vec<u16>, before: u16) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let current = d.doc.save_to_bytes().map_err(err)?;
+            let moved = pages::move_pages(&current, &list, before)?;
+            d.push_undo(current);
+            d.reload(pdfium, moved)?;
+            Ok(d.state_with_pages())
+        })
+        .await
+    }
+
+    pub async fn extract_pages(&self, id: DocId, list: Vec<u16>, out: String) -> Result<(), String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            pages::extract(pdfium, &docs.get(id)?.doc, &list, Path::new(&out))
+        })
+        .await
+    }
+
+    pub async fn split(&self, id: DocId, every: u16, dir: String) -> Result<Vec<String>, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let stem = Path::new(&d.path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
+            pages::split(pdfium, &d.doc, every, Path::new(&dir), &stem)
         })
         .await
     }
@@ -785,6 +887,10 @@ fn worker(rx: Receiver<Task>, lib_dirs: Vec<PathBuf>) {
     for task in rx {
         task(Ok(&mut docs));
     }
+}
+
+fn page_infos(doc: &PdfDocument) -> Vec<PageInfo> {
+    doc.pages().iter().map(|p| PageInfo { width: p.width().value, height: p.height().value }).collect()
 }
 
 fn doc_info(id: DocId, path: &str, doc: &PdfDocument) -> DocInfo {
@@ -1262,5 +1368,100 @@ mod tests {
         let im = &layout.images[0];
         assert!((im.rect[2] - im.rect[0] - 150.0).abs() < 0.5 && (im.rect[3] - im.rect[1] - 150.0).abs() < 0.5);
     }
-}
 
+    async fn first_line(e: &Engine, id: DocId, page: u16) -> String {
+        page_string(&e.page_text(id, page).await.unwrap()).lines().next().unwrap_or("").trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn rotate_delete_move_insert_pages() {
+        let (Some(path), Some(letter), Some(png)) = (corpus("multipage.pdf"), corpus("letter.pdf"), corpus("blue.png")) else {
+            return;
+        };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+
+        // Rotate: width and height swap; rotating back restores them.
+        let st = e.rotate_pages(doc.id, vec![0], 90).await.unwrap();
+        let p = st.pages.unwrap();
+        assert_eq!((p[0].width.round(), p[0].height.round()), (842.0, 595.0));
+        let p = e.rotate_pages(doc.id, vec![0], -90).await.unwrap().pages.unwrap();
+        assert_eq!((p[0].width.round(), p[0].height.round()), (595.0, 842.0));
+
+        // Delete pages 2 and 3.
+        let st = e.delete_pages(doc.id, vec![1, 2]).await.unwrap();
+        assert_eq!(st.pages.unwrap().len(), 198);
+        assert_eq!(first_line(&e, doc.id, 1).await, "Page 4");
+
+        // Undo brings them back (with the page list).
+        let st = e.undo(doc.id, false).await.unwrap();
+        assert_eq!(st.pages.unwrap().len(), 200);
+        assert_eq!(first_line(&e, doc.id, 1).await, "Page 2");
+
+        // Move pages 6 and 7 to the front; landscape page 4 keeps its size.
+        let st = e.move_pages(doc.id, vec![5, 6], 0).await.unwrap();
+        let p = st.pages.unwrap();
+        assert_eq!(p.len(), 200);
+        assert_eq!(first_line(&e, doc.id, 0).await, "Page 6");
+        assert_eq!(first_line(&e, doc.id, 1).await, "Page 7");
+        assert_eq!(first_line(&e, doc.id, 2).await, "Page 1");
+        assert!(p[5].width > p[5].height, "page 4 (now index 5) is still landscape");
+        // And to the end.
+        e.move_pages(doc.id, vec![0], 200).await.unwrap();
+        assert_eq!(first_line(&e, doc.id, 199).await, "Page 6");
+
+        // Insert blank, another PDF, and an image page.
+        let p = e.insert_blank_page(doc.id, 0, 300.0, 400.0).await.unwrap().pages.unwrap();
+        assert_eq!((p.len(), p[0].width, p[0].height), (201, 300.0, 400.0));
+        let p = e.insert_pages_from_file(doc.id, 201, letter, None).await.unwrap().pages.unwrap();
+        assert_eq!((p.len(), p[201].width, p[201].height), (202, 612.0, 792.0));
+        let p = e.insert_image_page(doc.id, 1, png).await.unwrap().pages.unwrap();
+        assert_eq!(p.len(), 203);
+        assert!((p[1].width - 842.0).abs() < 0.5 && (p[1].height - 421.0).abs() < 0.5, "{:?}", (p[1].width, p[1].height));
+        assert_eq!(e.page_layout(doc.id, 1).await.unwrap().1.images.len(), 1);
+
+        // A document must keep at least one page.
+        let all: Vec<u16> = (0..203).collect();
+        assert!(e.delete_pages(doc.id, all).await.is_err());
+        assert_eq!(e.state(doc.id).await.unwrap().can_undo, true);
+    }
+
+    #[tokio::test]
+    async fn moving_pages_keeps_bookmarks_and_links() {
+        let Some(path) = corpus("outline-links.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        // Move the last page (Chapter 2's target) to the front.
+        e.move_pages(doc.id, vec![2], 0).await.unwrap();
+        let outline = e.outline(doc.id).await.unwrap();
+        assert_eq!(outline[1].title, "Chapter 2");
+        assert_eq!(outline[1].page, Some(0), "bookmark follows its page");
+        assert_eq!(outline[0].page, Some(1));
+        // The internal link on the old first page (now index 1) still targets page "3" (now 0).
+        let links = e.links(doc.id, 1).await.unwrap();
+        assert!(links.iter().any(|l| l.page == Some(0)));
+    }
+
+    #[tokio::test]
+    async fn extract_and_split() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let out = temp_path("extract.pdf");
+        e.extract_pages(doc.id, vec![0, 3], out.to_string_lossy().into()).await.unwrap();
+        let x = e.open(out.to_string_lossy().into(), None).await.unwrap();
+        assert_eq!(x.pages.len(), 2);
+        assert!(x.pages[1].width > x.pages[1].height);
+        assert_eq!(first_line(&e, x.id, 1).await, "Page 4");
+
+        let dir = temp_path("split");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = e.split(doc.id, 80, dir.to_string_lossy().into()).await.unwrap();
+        let names: Vec<String> = files.iter().map(|f| Path::new(f).file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["multipage (1-80).pdf", "multipage (81-160).pdf", "multipage (161-200).pdf"]);
+        let last = e.open(files[2].clone(), None).await.unwrap();
+        assert_eq!(last.pages.len(), 40);
+        assert_eq!(first_line(&e, last.id, 0).await, "Page 161");
+    }
+}

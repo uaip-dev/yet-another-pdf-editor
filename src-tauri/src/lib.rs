@@ -2,6 +2,7 @@ mod annots;
 mod edit;
 mod engine;
 mod forms;
+mod pages;
 
 use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
 use std::sync::{Arc, Mutex};
@@ -238,6 +239,52 @@ async fn read_image_file(path: String) -> Result<Response, String> {
     std::fs::read(&path).map(Response::new).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn rotate_pages(engine: State<'_, Engine>, id: DocId, pages: Vec<u16>, delta: i32) -> Result<DocState, String> {
+    engine.rotate_pages(id, pages, delta).await
+}
+
+#[tauri::command]
+async fn delete_pages(engine: State<'_, Engine>, id: DocId, pages: Vec<u16>) -> Result<DocState, String> {
+    engine.delete_pages(id, pages).await
+}
+
+#[tauri::command]
+async fn move_pages(engine: State<'_, Engine>, id: DocId, pages: Vec<u16>, before: u16) -> Result<DocState, String> {
+    engine.move_pages(id, pages, before).await
+}
+
+#[tauri::command]
+async fn insert_blank_page(engine: State<'_, Engine>, id: DocId, at: u16, width: f32, height: f32) -> Result<DocState, String> {
+    engine.insert_blank_page(id, at, width, height).await
+}
+
+#[tauri::command]
+async fn insert_pages_from_file(
+    engine: State<'_, Engine>,
+    id: DocId,
+    at: u16,
+    path: String,
+    password: Option<String>,
+) -> Result<DocState, String> {
+    engine.insert_pages_from_file(id, at, path, password).await
+}
+
+#[tauri::command]
+async fn insert_image_page(engine: State<'_, Engine>, id: DocId, at: u16, path: String) -> Result<DocState, String> {
+    engine.insert_image_page(id, at, path).await
+}
+
+#[tauri::command]
+async fn extract_pages(engine: State<'_, Engine>, id: DocId, pages: Vec<u16>, out: String) -> Result<(), String> {
+    engine.extract_pages(id, pages, out).await
+}
+
+#[tauri::command]
+async fn split_document(engine: State<'_, Engine>, id: DocId, every: u16, dir: String) -> Result<Vec<String>, String> {
+    engine.split(id, every, dir).await
+}
+
 /// Returns (once) the PDFs the app was launched with.
 #[tauri::command]
 fn take_startup_files(files: State<'_, StartupFiles>) -> Vec<String> {
@@ -315,7 +362,15 @@ pub fn run() {
             add_annotation,
             change_annotation,
             fill_fields,
-            read_image_file
+            read_image_file,
+            rotate_pages,
+            delete_pages,
+            move_pages,
+            insert_blank_page,
+            insert_pages_from_file,
+            insert_image_page,
+            extract_pages,
+            split_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
