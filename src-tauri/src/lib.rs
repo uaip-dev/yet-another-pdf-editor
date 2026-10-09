@@ -13,6 +13,7 @@ mod forms;
 mod pages;
 mod redact;
 
+pub use docops::{CompressReport, ImageFormat, Protection};
 pub use pdfium_render;
 
 use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
