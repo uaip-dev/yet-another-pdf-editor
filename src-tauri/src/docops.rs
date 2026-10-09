@@ -206,7 +206,7 @@ pub struct Protection {
 pub fn decrypt(bytes: &[u8], password: &str) -> Result<(Vec<u8>, Protection), String> {
     // load_mem() does not load the objects of an encrypted file; the
     // password-aware loader decrypts them while parsing.
-    let doc = lopdf::Document::load_mem_with_password(bytes, password).map_err(|e| format!("Could not decrypt: {e}"))?;
+    let doc = lopdf::Document::load_mem_with_options(bytes, lopdf::LoadOptions::with_password(password)).map_err(|e| format!("Could not decrypt: {e}"))?;
     let perms = doc
         .encryption_state
         .as_ref()

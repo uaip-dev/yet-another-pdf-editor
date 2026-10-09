@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type Tool = "edit" | "addText" | "addImage";
+  export type Tool = "edit" | "addText" | "addImage" | "redact";
 
   export interface EditSelection {
     page: number;
@@ -43,9 +43,31 @@
     /** Runs a document change; the parent applies the resulting state. */
     run: (op: () => Promise<DocState>) => Promise<boolean>;
     ondone: () => void;
+    /** Areas marked for redaction on this page (not yet applied). */
+    marks?: Rect4[];
+    onmark?: (r: Rect4) => void;
+    onunmark?: (index: number) => void;
   }
 
-  let { docId, page, width, height, scale, layout, tool, selection, newTextStyle, onselect, run, ondone }: Props = $props();
+  let {
+    docId,
+    page,
+    width,
+    height,
+    scale,
+    layout,
+    tool,
+    selection,
+    newTextStyle,
+    onselect,
+    run,
+    ondone,
+    marks = [],
+    onmark,
+    onunmark,
+  }: Props = $props();
+
+  let marking: Rect4 | null = $state(null);
 
   // Rect currently being dragged/resized (page points), before it is committed.
   let draft: { target: "block" | "image"; id: number; rect: Rect4 } | null = $state(null);
@@ -169,6 +191,24 @@
     e.preventDefault();
     if (editing) return commitEdit();
     const at = pointOf(e, e.currentTarget as HTMLElement);
+    if (tool === "redact") {
+      const el = e.currentTarget as HTMLElement;
+      marking = [at[0], at[1], at[0], at[1]];
+      const move = (ev: PointerEvent) => {
+        const q = pointOf(ev, el);
+        marking = [Math.min(at[0], q[0]), Math.min(at[1], q[1]), Math.max(at[0], q[0]), Math.max(at[1], q[1])];
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        const r = marking;
+        marking = null;
+        if (r && r[2] - r[0] > 2 && r[3] - r[1] > 2) onmark?.(r);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      return;
+    }
     if (tool === "addText") {
       editing = { block: null, at, text: "" };
       await tick();
@@ -234,8 +274,15 @@
   class="layer"
   class:add-text={tool === "addText"}
   class:add-image={tool === "addImage"}
+  class:redact={tool === "redact"}
   onpointerdown={onLayerDown}
 >
+  {#each marks as m, i}
+    <div class="mark" style={pct(m)}>
+      <button class="unmark" title="Remove this mark" aria-label="Remove redaction mark" onpointerdown={(e) => e.stopPropagation()} onclick={() => onunmark?.(i)}>×</button>
+    </div>
+  {/each}
+  {#if marking}<div class="mark drawing" style={pct(marking)}></div>{/if}
   {#each layout.images as im (im.id)}
     {@const sel = isSelected("image", im.id)}
     <div
@@ -316,8 +363,38 @@
     background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
   .add-text .box,
-  .add-image .box {
+  .add-image .box,
+  .redact .box {
     pointer-events: none;
+  }
+  .layer.redact {
+    cursor: crosshair;
+  }
+  .mark {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid #e0262f;
+    background: repeating-linear-gradient(45deg, rgb(224 38 47 / 0.18) 0 6px, rgb(224 38 47 / 0.32) 6px 12px);
+    z-index: 2;
+  }
+  .mark.drawing {
+    border-style: dashed;
+  }
+  .unmark {
+    position: absolute;
+    top: -10px;
+    right: -10px;
+    width: 20px;
+    height: 20px;
+    min-height: 0;
+    padding: 0;
+    border-radius: 50%;
+    border: none;
+    background: #e0262f;
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
   }
   .box.block {
     margin: -2px;

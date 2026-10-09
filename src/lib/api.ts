@@ -366,3 +366,69 @@ export function pageLabel(pages: number[]): string {
   }
   return parts.join(", ");
 }
+
+// ---- Document: properties, protection, export, compress, redact ----
+
+export interface Properties {
+  title: string;
+  author: string;
+  subject: string;
+  keywords: string;
+  creator: string;
+  producer: string;
+  created: string;
+  modified: string;
+  version: string;
+  pageCount: number;
+  pageSize: string;
+  fileSize: number;
+  protected: boolean;
+}
+
+export interface Protection {
+  userPassword: string;
+  ownerPassword: string;
+  allowPrint: boolean;
+  allowCopy: boolean;
+  allowEdit: boolean;
+}
+
+export interface CompressReport {
+  before: number;
+  after: number;
+  imagesResampled: number;
+}
+
+export function documentProperties(id: number): Promise<Properties> {
+  return invoke<Properties>("document_properties", { id });
+}
+
+export function setDocumentProperties(id: number, props: Properties): Promise<DocState> {
+  return invoke<DocState>("set_document_properties", { id, props });
+}
+
+export function documentProtection(id: number): Promise<Protection | null> {
+  return invoke<Protection | null>("document_protection", { id });
+}
+
+export function setDocumentProtection(id: number, protection: Protection | null): Promise<DocState> {
+  return invoke<DocState>("set_document_protection", { id, protection });
+}
+
+export function exportImages(id: number, pages: number[], dpi: number, format: "png" | "jpeg", dir: string): Promise<string[]> {
+  return invoke<string[]>("export_images", { id, pages, dpi, format, dir });
+}
+
+export function compressDocument(id: number, maxDpi: number, quality: number): Promise<{ state: DocState; report: CompressReport }> {
+  return invoke("compress_document", { id, maxDpi, quality });
+}
+
+export function redactAreas(id: number, page: number, rects: Rect4[]): Promise<DocState> {
+  return invoke<DocState>("redact_areas", { id, page, rects });
+}
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}

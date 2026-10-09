@@ -11,6 +11,7 @@
   import type { Tool } from "$lib/EditLayer.svelte";
   import type { AnnotTool, Signature } from "$lib/AnnotLayer.svelte";
   import SignatureDialog from "$lib/SignatureDialog.svelte";
+  import DocDialogs, { type DocDialog } from "$lib/DocDialogs.svelte";
   import { printDocument } from "$lib/print";
   import {
     closeDocument,
@@ -394,6 +395,22 @@
     }
   }
 
+  // ---- Document dialogs, More menu, redaction ----
+
+  let docDialog: DocDialog | null = $state(null);
+  let moreOpen = $state(false);
+  let redactMarks = $state(0);
+
+  async function applyRedactions() {
+    const n = redactMarks;
+    const ok = await ask(
+      `Permanently remove the text, images and comments under ${n} marked area${n > 1 ? "s" : ""}? ` +
+        "Undo works until you save; after saving the content is gone for good.",
+      { title: APP_NAME, kind: "warning", okLabel: "Redact", cancelLabel: "Cancel" },
+    );
+    if (ok && (await view?.applyRedactions())) showNotice("Redacted. Save to make it permanent.");
+  }
+
   // ---- Pages ----
 
   let splitFor: Tab | null = $state(null);
@@ -640,6 +657,28 @@ ${t.doc.path}` : t.doc.path}>
       <button class="icon-btn" onclick={print} disabled={!!printing} title="Print (Ctrl+P)" aria-label="Print">
         <Icon name="print" />
       </button>
+      <div class="menu-wrap">
+        <button class="icon-btn" class:on={moreOpen} onclick={() => (moreOpen = !moreOpen)} title="More" aria-label="More" aria-haspopup="menu" aria-expanded={moreOpen}>
+          <Icon name="more" />
+        </button>
+        {#if moreOpen}
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+          <div class="menu-scrim" onclick={() => (moreOpen = false)}></div>
+          <div class="menu open more-menu" role="menu">
+            {#each [
+              { label: "Save as…", icon: "save", act: () => saveTab(tab, true) },
+              { label: "Document properties…", icon: "info", act: () => (docDialog = "properties") },
+              { label: "Password protection…", icon: "lock", act: () => (docDialog = "protect") },
+              { label: "Reduce file size…", icon: "shrink", act: () => (docDialog = "compress") },
+              { label: "Export as images…", icon: "export", act: () => (docDialog = "export") },
+            ] as item}
+              <button role="menuitem" onclick={() => { moreOpen = false; item.act(); }}>
+                <Icon name={item.icon as import("$lib/Icon.svelte").IconName} size={16} />{item.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <span class="sep"></span>
       <button class="edit-toggle" class:on={!!tool} onclick={() => setMode(tool ? null : "edit")} title="Edit text and images (Ctrl+E)">
         <Icon name="edit" size={16} />Edit
@@ -723,6 +762,13 @@ ${t.doc.path}` : t.doc.path}>
       <button class="tool" class:on={tool === "addImage"} onclick={() => (tool = "addImage")} title="Click on the page to add an image">
         <Icon name="image" size={16} />Add image
       </button>
+      <button class="tool" class:on={tool === "redact"} onclick={() => (tool = "redact")} title="Mark areas to remove permanently">
+        <Icon name="redact" size={16} />Redact
+      </button>
+      {#if redactMarks}
+        <button class="danger-btn" onclick={applyRedactions}>Apply {redactMarks} redaction{redactMarks > 1 ? "s" : ""}</button>
+        <button class="link" onclick={() => view?.clearRedactions()}>Clear marks</button>
+      {/if}
       {#if tool === "addText"}
         <span class="sep"></span>
         <select bind:value={newTextStyle.family} aria-label="Font">
@@ -747,6 +793,7 @@ ${t.doc.path}` : t.doc.path}>
       <span class="hint muted">
         {#if tool === "edit"}Double-click text to edit · drag to move · corners resize images · Del deletes
         {:else if tool === "addText"}Click where the text should start · Ctrl+Enter or click outside to finish
+        {:else if tool === "redact"}Drag over anything to remove · then Apply
         {:else}Click where the image's top-left corner should go{/if}
       </span>
     </div>
@@ -877,6 +924,9 @@ ${t.doc.path}` : t.doc.path}>
             {annotWidth}
             {signature}
             onannotdone={() => (annotTool = "select")}
+            onmarkschange={(n) => {
+              if (t.key === activeKey) redactMarks = n;
+            }}
             bind:this={views[t.key]}
           />
           {/key}
@@ -925,6 +975,19 @@ ${t.doc.path}` : t.doc.path}>
       </div>
     </div>
   </div>
+{/if}
+
+{#if docDialog && tab}
+  {@const t = tab}
+  <DocDialogs
+    kind={docDialog}
+    docId={t.doc.id}
+    pageCount={t.doc.pages.length}
+    pages={targetPages(t)}
+    onstate={(s) => applyState(t, s)}
+    onnotice={showNotice}
+    onclose={() => (docDialog = null)}
+  />
 {/if}
 
 {#if splitFor}
@@ -1287,6 +1350,29 @@ ${t.doc.path}` : t.doc.path}>
   }
   .side-tabs button.on {
     background: var(--btn-hover);
+  }
+  .menu-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+  }
+  .more-menu {
+    min-width: 220px;
+  }
+  .more-menu button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .danger-btn {
+    margin-left: 8px;
+    background: #e0262f;
+    border-color: #e0262f;
+    color: #fff;
+    white-space: nowrap;
+  }
+  .danger-btn:hover:not(:disabled) {
+    background: #c81f28;
   }
   .page-tools {
     display: flex;

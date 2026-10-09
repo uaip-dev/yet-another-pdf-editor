@@ -12,6 +12,7 @@
     pageLayout,
     pageLinks,
     pageText,
+    redactAreas,
     renderPage,
     STALE,
     textOf,
@@ -57,6 +58,8 @@
     annotWidth?: number;
     signature?: Signature | null;
     onannotdone?: () => void;
+    /** Called with the number of areas marked for redaction. */
+    onmarkschange?: (n: number) => void;
   }
 
   let {
@@ -76,6 +79,7 @@
     annotWidth = 2,
     signature = null,
     onannotdone,
+    onmarkschange,
   }: Props = $props();
 
   const isMarkup = (t: AnnotTool | null) => !!t && (MARKUP_TOOLS as readonly string[]).includes(t);
@@ -102,6 +106,26 @@
   const editLayers: Record<number, EditLayer> = $state({});
   let editSel: EditSelection | null = $state(null);
   let busy = false;
+
+  // Redaction marks (page -> areas), applied together.
+  const marks = new SvelteMap<number, [number, number, number, number][]>();
+  /** Number of areas marked for redaction. */
+  export function redactionCount() {
+    let n = 0;
+    marks.forEach((m) => (n += m.length));
+    return n;
+  }
+  export function clearRedactions() {
+    marks.clear();
+  }
+  export async function applyRedactions() {
+    for (const [page, rects] of [...marks.entries()].sort((a, b) => a[0] - b[0])) {
+      if (!(await run(() => redactAreas(doc.id, page, rects)))) return false;
+      marks.delete(page);
+    }
+    return true;
+  }
+  $effect(() => onmarkschange?.(redactionCount()));
 
   // Annotations and form fields
   const extras = new SvelteMap<number, PageExtras>();
@@ -505,6 +529,9 @@
           onselect={(s) => (editSel = s)}
           {run}
           ondone={() => ontooldone?.()}
+          marks={marks.get(i) ?? []}
+          onmark={(r) => marks.set(i, [...(marks.get(i) ?? []), r])}
+          onunmark={(k) => marks.set(i, (marks.get(i) ?? []).filter((_, j) => j !== k))}
         />
       {:else if annotTool && !isMarkup(annotTool) && nearPages.has(i) && extras.get(i)}
         <AnnotLayer

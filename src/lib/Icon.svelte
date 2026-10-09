@@ -35,6 +35,12 @@
     rotateRight: "M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",
     insert: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM12 8v8M8 12h8",
     extract: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6M14 3l6 6M14 3v6h6M16 15h6M19 12l3 3-3 3",
+    more: "M5 12h.01M12 12h.01M19 12h.01",
+    redact: "M3 5h18v6H3zM3 15h8M3 19h12M15 15l6 6M21 15l-6 6",
+    lock: "M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4",
+    info: "M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18zM12 11v6M12 7.5h.01",
+    shrink: "M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7",
+    export: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21",
     scissors: "M6 3a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM6 15a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12",
   } as const;
   export type IconName = keyof typeof PATHS;

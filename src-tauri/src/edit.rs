@@ -451,28 +451,69 @@ const BUILTINS: [PdfFontBuiltin; 12] = [
     PdfFontBuiltin::CourierBoldOblique,
 ];
 
-#[cfg(windows)]
-const SYSTEM_FONTS: [&str; 12] = [
-    "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf",
-    "times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf",
-    "cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf",
-];
-
-fn system_font_path(i: u8) -> Option<std::path::PathBuf> {
+/// System TrueType fonts per style slot (family*4 + bold + 2*italic), in
+/// order of preference. Used for characters outside WinAnsi.
+fn system_font_candidates(i: u8) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let family = i / 4;
     #[cfg(windows)]
     {
-        let dir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or("C:\\Windows".into());
-        let p = dir.join("Fonts").join(SYSTEM_FONTS[i as usize]);
-        // Fall back to the regular face of the family, then to Arial.
-        [p, dir.join("Fonts").join(SYSTEM_FONTS[(i & !3) as usize]), dir.join("Fonts").join("arial.ttf")]
-            .into_iter()
-            .find(|p| p.exists())
+        const NAMES: [&str; 12] = [
+            "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf",
+            "times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf",
+            "cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf",
+        ];
+        let dir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or(r"C:\Windows".into()).join("Fonts");
+        // The exact face, the family's regular face, then Arial.
+        vec![dir.join(NAMES[i as usize]), dir.join(NAMES[(family * 4) as usize]), dir.join("arial.ttf")]
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = i;
-        None
+        const NAMES: [&str; 12] = [
+            "Arial.ttf", "Arial Bold.ttf", "Arial Italic.ttf", "Arial Bold Italic.ttf",
+            "Times New Roman.ttf", "Times New Roman Bold.ttf", "Times New Roman Italic.ttf", "Times New Roman Bold Italic.ttf",
+            "Courier New.ttf", "Courier New Bold.ttf", "Courier New Italic.ttf", "Courier New Bold Italic.ttf",
+        ];
+        let sup = PathBuf::from("/System/Library/Fonts/Supplemental");
+        vec![
+            sup.join(NAMES[i as usize]),
+            sup.join(NAMES[(family * 4) as usize]),
+            PathBuf::from("/Library/Fonts/Arial Unicode.ttf"),
+            sup.join("Arial Unicode.ttf"),
+            sup.join("Arial.ttf"),
+        ]
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        const DEJAVU: [&str; 3] = ["DejaVuSans", "DejaVuSerif", "DejaVuSansMono"];
+        const LIBERATION: [&str; 3] = ["LiberationSans", "LiberationSerif", "LiberationMono"];
+        let style = match i % 4 {
+            1 => "-Bold",
+            2 => "-Oblique",
+            3 => "-BoldOblique",
+            _ => "",
+        };
+        let lib_style = match i % 4 {
+            1 => "-Bold",
+            2 => "-Italic",
+            3 => "-BoldItalic",
+            _ => "-Regular",
+        };
+        let f = family as usize;
+        let mut v = Vec::new();
+        for root in ["/usr/share/fonts/truetype", "/usr/share/fonts", "/usr/local/share/fonts"] {
+            v.push(PathBuf::from(format!("{root}/dejavu/{}{style}.ttf", DEJAVU[f])));
+            v.push(PathBuf::from(format!("{root}/dejavu/{}.ttf", DEJAVU[f])));
+            v.push(PathBuf::from(format!("{root}/liberation/{}{lib_style}.ttf", LIBERATION[f])));
+            v.push(PathBuf::from(format!("{root}/TTF/{}{style}.ttf", DEJAVU[f])));
+            v.push(PathBuf::from(format!("{root}/dejavu/DejaVuSans.ttf")));
+        }
+        v
+    }
+}
+
+fn system_font_path(i: u8) -> Option<std::path::PathBuf> {
+    system_font_candidates(i).into_iter().find(|p| p.exists())
 }
 
 fn style_slot(family: &str, bold: bool, italic: bool) -> u8 {
