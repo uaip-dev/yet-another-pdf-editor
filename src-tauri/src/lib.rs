@@ -1,10 +1,19 @@
+//! Yet Another PDF Editor.
+//!
+//! The app can be extended without changing this crate: `run_with` lets a
+//! separate build add Tauri plugins, `engine::Engine::with_document` gives
+//! them access to open documents (with undo), and `Capabilities` tells the UI
+//! which extra features are present. See docs/EXTENSIONS.md.
+
 mod annots;
 mod docops;
 mod edit;
-mod engine;
+pub mod engine;
 mod forms;
 mod pages;
 mod redact;
+
+pub use pdfium_render;
 
 use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
 use std::sync::{Arc, Mutex};
@@ -12,6 +21,29 @@ use tauri::{ipc::Response, AppHandle, Emitter, Manager, State};
 
 /// PDF paths passed on the command line at startup (e.g. "Open with").
 struct StartupFiles(Mutex<Vec<String>>);
+
+/// Names of optional features provided by extensions (e.g. "ocr"). The UI
+/// asks for this list to decide which extra tools to show.
+#[derive(Default)]
+pub struct Capabilities(Mutex<Vec<String>>);
+
+impl Capabilities {
+    pub fn add(&self, name: &str) {
+        let mut list = self.0.lock().unwrap();
+        if !list.iter().any(|n| n == name) {
+            list.push(name.to_string());
+        }
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tauri::command]
+fn capabilities(caps: State<'_, Capabilities>) -> Vec<String> {
+    caps.list()
+}
 
 #[tauri::command]
 async fn open_document(
@@ -372,8 +404,17 @@ fn pdfium_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_with(tauri::generate_context!(), |builder| builder);
+}
+
+/// Runs the app with a given context (app config) and lets `extend` add
+/// plugins and state to the builder before it starts.
+pub fn run_with<F>(context: tauri::Context<tauri::Wry>, extend: F)
+where
+    F: FnOnce(tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry>,
+{
     let cwd = std::env::current_dir().unwrap_or_default();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Must be first: a second launch forwards its files here and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let files = pdf_args(argv, std::path::Path::new(&cwd));
@@ -391,6 +432,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_log::Builder::new().build())
         .manage(StartupFiles(Mutex::new(pdf_args(std::env::args(), &cwd))))
+        .manage(Capabilities::default());
+    extend(builder)
         .setup(|app| {
             app.manage(Engine::start(pdfium_dirs(app.handle())));
             Ok(())
@@ -435,8 +478,9 @@ pub fn run() {
             set_document_protection,
             export_images,
             compress_document,
-            redact_areas
+            redact_areas,
+            capabilities
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

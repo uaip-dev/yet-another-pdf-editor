@@ -4,6 +4,7 @@
 // See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
+import process from "node:process";
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -12,6 +13,11 @@ const config = {
     adapter: adapter({
       fallback: "index.html",
     }),
+    alias: {
+      // Extension UI slot (docs/EXTENSIONS.md). Community builds use the empty
+      // components in src/lib/pro; other builds set YAPE_PRO_UI to their own folder.
+      $pro: process.env.YAPE_PRO_UI || "src/lib/pro",
+    },
   },
 };
 

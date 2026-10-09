@@ -13,6 +13,9 @@
   import SignatureDialog from "$lib/SignatureDialog.svelte";
   import DocDialogs, { type DocDialog } from "$lib/DocDialogs.svelte";
   import AboutDialog from "$lib/AboutDialog.svelte";
+  import ProMoreMenu from "$pro/MoreMenu.svelte";
+  import ProHost from "$pro/Host.svelte";
+  import { capabilities as loadCapabilities, type ExtensionContext } from "$lib/extension";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { printDocument } from "$lib/print";
@@ -401,6 +404,7 @@
   // ---- Updates ----
 
   let update: Update | null = $state(null);
+  let caps: string[] = $state([]);
   let aboutOpen = $state(false);
   let updating = $state(false);
 
@@ -432,6 +436,29 @@
       updating = false;
     }
   }
+
+  // ---- Extensions ($pro slot) ----
+
+  const extCtx: ExtensionContext = $derived({
+    doc: tab
+      ? {
+          id: tab.doc.id,
+          path: tab.doc.path,
+          pageCount: tab.doc.pages.length,
+          currentPage: tab.currentPage,
+          pages: tab.pageSel.length ? [...tab.pageSel].sort((a, b) => a - b) : [tab.currentPage],
+        }
+      : null,
+    capabilities: caps,
+    onstate: (s) => {
+      if (tab) applyState(tab, s);
+    },
+    onnotice: (m) => showNotice(m),
+    onerror: (m) => (error = m),
+    reloadCapabilities: async () => {
+      caps = await loadCapabilities();
+    },
+  });
 
   // ---- Document dialogs, More menu, redaction ----
 
@@ -644,6 +671,8 @@
       await appWindow.destroy();
     });
 
+    loadCapabilities().then((c) => (caps = c));
+
     // Release builds look for a newer version on GitHub a few seconds after start.
     if (import.meta.env.PROD) setTimeout(checkForUpdate, 4000);
 
@@ -726,6 +755,7 @@ ${t.doc.path}` : t.doc.path}>
                 <Icon name={item.icon as import("$lib/Icon.svelte").IconName} size={16} />{item.label}
               </button>
             {/each}
+            <ProMoreMenu ctx={extCtx} close={() => (moreOpen = false)} />
           </div>
         {/if}
       </div>
@@ -1055,8 +1085,11 @@ ${t.doc.path}` : t.doc.path}>
   />
 {/if}
 
+<ProHost ctx={extCtx} />
+
 {#if aboutOpen}
   <AboutDialog
+    edition={caps.includes("pro") ? "Pro" : "Community"}
     oncheck={async () => {
       update = await check();
       return update?.version ?? null;

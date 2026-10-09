@@ -10,9 +10,11 @@
     /** Installs the update found by `oncheck` and restarts. */
     oninstall: () => void;
     onclose: () => void;
+    /** "Community" or the name of the edition provided by extensions. */
+    edition?: string;
   }
 
-  let { oncheck, oninstall, onclose }: Props = $props();
+  let { oncheck, oninstall, onclose, edition = "Community" }: Props = $props();
 
   const WEBSITE = "https://yetanotherpdf.dev";
   const REPO = "https://github.com/uaip-dev/yet-another-pdf-editor";
@@ -63,7 +65,7 @@
       <img src="/app-icon.png" alt="" width="72" height="72" />
       <div>
         <h2 id="about-title">Yet Another PDF Editor</h2>
-        <p class="version">Version {version || "—"}</p>
+        <p class="version">Version {version || "—"} · {edition} edition</p>
         <p class="tagline">A lightweight, open-source PDF editor for Windows, macOS and Linux.</p>
       </div>
     </div>

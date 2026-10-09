@@ -205,6 +205,62 @@ pub struct DocState {
     pub pages: Option<Vec<PageInfo>>,
 }
 
+/// An open document, as seen by an extension running on the PDF thread.
+///
+/// To change the document with undo support, either modify `doc_mut()`
+/// between `begin_change()` and `finish_change()`, or produce new bytes and
+/// pass them to `replace()`. Return `state()` to the UI afterwards.
+pub struct DocAccess<'x, 'a> {
+    pdfium: &'a Pdfium,
+    d: &'x mut OpenDoc<'a>,
+}
+
+impl<'x, 'a> DocAccess<'x, 'a> {
+    pub fn pdfium(&self) -> &'a Pdfium {
+        self.pdfium
+    }
+
+    pub fn doc(&self) -> &PdfDocument<'a> {
+        &self.d.doc
+    }
+
+    pub fn doc_mut(&mut self) -> &mut PdfDocument<'a> {
+        &mut self.d.doc
+    }
+
+    /// The document's file path.
+    pub fn path(&self) -> &str {
+        &self.d.path
+    }
+
+    /// The current document as PDF bytes (unencrypted).
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        self.d.doc.save_to_bytes().map_err(err)
+    }
+
+    /// Records an undo point before changing `doc_mut()`.
+    pub fn begin_change(&mut self) -> Result<(), String> {
+        self.d.snapshot()
+    }
+
+    /// Marks the document changed (refreshes caches, bumps the revision).
+    pub fn finish_change(&mut self) {
+        self.d.changed();
+    }
+
+    /// Replaces the document with `bytes`, keeping the current version for undo.
+    pub fn replace(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        let current = self.bytes()?;
+        self.d.push_undo(current);
+        self.d.reload(self.pdfium, bytes)
+    }
+
+    /// The document state to return to the UI (includes the page list).
+    pub fn state(&self) -> DocState {
+        self.d.state_with_pages()
+    }
+}
+
 /// Annotations and form fields of one page.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +440,21 @@ impl Engine {
         });
         self.tx.send(task).map_err(|_| "PDF engine stopped".to_string())?;
         rx.await.map_err(|_| "PDF engine stopped".to_string())?
+    }
+
+    /// Runs `f` with access to an open document on the PDF thread. This is
+    /// the entry point for extensions; see [`DocAccess`].
+    pub async fn with_document<T, F>(&self, id: DocId, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: for<'x, 'a> FnOnce(&mut DocAccess<'x, 'a>) -> Result<T, String> + Send + 'static,
+    {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            f(&mut DocAccess { pdfium, d })
+        })
+        .await
     }
 
     pub async fn open(&self, path: String, password: Option<String>) -> Result<DocInfo, String> {
@@ -1702,5 +1773,37 @@ mod tests {
         let [r, g, bl] = pixel(&img, ((im[0] + im[2]) / 2.0 + 30.0) as u32, ((im[1] + im[3]) / 2.0) as u32);
         assert!(bl > 150 && r < 100 && g < 160, "right half untouched: {r},{g},{bl}");
         e.save(doc.id, Some(temp_path("redacted-image.pdf").to_string_lossy().into()), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn extensions_can_change_documents_with_undo() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        // An "extension" deletes the first page through DocAccess.
+        let st = e
+            .with_document(doc.id, |acc: &mut DocAccess| {
+                acc.begin_change()?;
+                acc.doc().pages().get(0).map_err(err)?.delete().map_err(err)?;
+                acc.finish_change();
+                Ok(acc.state())
+            })
+            .await
+            .unwrap();
+        assert_eq!(st.pages.unwrap().len(), 199);
+        assert!(st.can_undo && st.dirty);
+        // Replacing with new bytes is undoable too.
+        let st = e
+            .with_document(doc.id, |acc: &mut DocAccess| {
+                let bytes = acc.bytes()?;
+                acc.replace(bytes)?;
+                Ok(acc.state())
+            })
+            .await
+            .unwrap();
+        assert_eq!(st.pages.unwrap().len(), 199);
+        e.undo(doc.id, false).await.unwrap();
+        let st = e.undo(doc.id, false).await.unwrap();
+        assert_eq!(st.pages.unwrap().len(), 200);
     }
 }

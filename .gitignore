@@ -14,3 +14,6 @@ vite.config.ts.timestamp-*
 
 # Never commit PDFs (user samples may be private)
 *.pdf
+
+# Extension UI copied in at build time (docs/EXTENSIONS.md)
+/.pro-ui/
