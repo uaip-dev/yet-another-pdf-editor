@@ -46,11 +46,12 @@ app.state::<yape_lib::Capabilities>().add("my-feature");
 
 ## Frontend
 
-The UI imports two slot components from the `$pro` alias:
+The UI imports three slot components from the `$pro` alias:
 
 | Component | Mounted | Use it for |
 |---|---|---|
 | `MoreMenu.svelte` | inside the toolbar's More menu | extra menu items (`<button role="menuitem">`) |
+| `Start.svelte` | on the start screen (no document open) | actions that don't need a document |
 | `Host.svelte` | always | dialogs, panels and other UI |
 
 Both receive `ctx: ExtensionContext` (see `src/lib/extension.ts`): the active document,

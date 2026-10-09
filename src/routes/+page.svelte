@@ -15,6 +15,7 @@
   import AboutDialog from "$lib/AboutDialog.svelte";
   import ProMoreMenu from "$pro/MoreMenu.svelte";
   import ProHost from "$pro/Host.svelte";
+  import ProStart from "$pro/Start.svelte";
   import { capabilities as loadCapabilities, type ExtensionContext } from "$lib/extension";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -1033,6 +1034,7 @@ ${t.doc.path}` : t.doc.path}>
           <h1>{APP_NAME}</h1>
           <button class="primary" onclick={pickFile}>Open file…</button>
           <p class="muted">or drop PDFs anywhere in this window</p>
+          <ProStart ctx={extCtx} />
           {#if recent.length}
             <section class="recent" aria-label="Recent files">
               <h2>Recent</h2>
