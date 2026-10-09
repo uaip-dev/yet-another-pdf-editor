@@ -1,4 +1,4 @@
-# PDF Editor
+# Yet Another PDF Editor
 
 A lightweight, open-source PDF viewer and editor for Windows (macOS and Linux later).
 It's built with Tauri 2, Svelte 5 and PDFium. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.

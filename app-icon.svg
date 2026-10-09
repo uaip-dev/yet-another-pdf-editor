@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Yet Another PDF Editor: a page being edited (text cursor + highlight),
+       a second page behind it ("another"), and a pencil. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B6CFF"/>
+      <stop offset="1" stop-color="#8A3FFC"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".18"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#1B0F5C" flood-opacity=".35"/>
+    </filter>
+  </defs>
+
+  <!-- background tile -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#shine)"/>
+
+  <!-- the "another" page behind -->
+  <rect x="300" y="196" width="400" height="560" rx="36" fill="#fff" opacity=".32"
+        transform="rotate(-10 500 476)"/>
+
+  <!-- front page with folded corner -->
+  <g filter="url(#shadow)">
+    <path d="M366 230 H620 L730 340 V754 Q730 790 694 790 H366 Q330 790 330 754 V266 Q330 230 366 230 Z"
+          fill="#fff"/>
+  </g>
+  <path d="M620 230 V304 Q620 340 656 340 H730 Z" fill="#D8D2FF"/>
+
+  <!-- text lines -->
+  <rect x="390" y="300" width="170" height="30" rx="15" fill="#8A3FFC"/>
+  <rect x="390" y="396" width="270" height="26" rx="13" fill="#D4D0EC"/>
+  <rect x="390" y="456" width="290" height="26" rx="13" fill="#D4D0EC"/>
+  <rect x="390" y="516" width="220" height="26" rx="13" fill="#D4D0EC"/>
+
+  <!-- line being edited: highlight + text cursor -->
+  <rect x="380" y="568" width="196" height="46" rx="10" fill="#FFD54A"/>
+  <rect x="398" y="580" width="160" height="22" rx="11" fill="#B8860B" opacity=".55"/>
+  <rect x="584" y="556" width="12" height="70" rx="6" fill="#5B6CFF"/>
+
+  <!-- pencil, tip resting on the page -->
+  <g transform="translate(606 724) rotate(45)">
+    <path d="M0 0 L-36 -86 H36 Z" fill="#F6CFA4"/>
+    <path d="M0 0 L-13 -31 H13 Z" fill="#2A2740"/>
+    <rect x="-36" y="-336" width="72" height="252" fill="#FF8A3D"/>
+    <rect x="-36" y="-336" width="24" height="252" fill="#FFAA6B"/>
+    <rect x="-36" y="-386" width="72" height="52" fill="#CDD2E0"/>
+    <rect x="-36" y="-372" width="72" height="8" fill="#A9AFC2"/>
+    <path d="M-36 -386 V-420 Q-36 -444 -12 -444 H12 Q36 -444 36 -420 V-386 Z" fill="#FF6F91"/>
+  </g>
+</svg>

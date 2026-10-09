@@ -35,3 +35,21 @@ w = PdfWriter(clone_from=str(out / "letter.pdf"))
 w.encrypt(user_password="test", owner_password="owner")
 w.write(out / "encrypted-password-test.pdf")
 print("wrote", sorted(p.name for p in out.iterdir()))
+
+# Outline (bookmarks) + internal and external links
+c = canvas.Canvas(str(out / "outline-links.pdf"), pagesize=A4)
+for i in range(3):
+    c.bookmarkPage(f"p{i}")
+    c.setFont("Helvetica", 20)
+    c.drawString(72, 760, f"Outline page {i + 1}")
+    if i == 0:
+        c.drawString(72, 700, "Go to page 3")
+        c.linkRect("", "p2", (70, 695, 220, 720), relative=0)
+        c.drawString(72, 660, "Visit example.com")
+        c.linkURL("https://example.com/", (70, 655, 260, 680), relative=0)
+    c.showPage()
+c.addOutlineEntry("Chapter 1", "p0", level=0)
+c.addOutlineEntry("Section 1.1", "p1", level=1)
+c.addOutlineEntry("Chapter 2", "p2", level=0)
+c.save()
+print("wrote outline-links.pdf")
