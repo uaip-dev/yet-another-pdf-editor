@@ -4,6 +4,7 @@ mod edit;
 mod engine;
 mod forms;
 mod pages;
+mod redact;
 
 use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
 use std::sync::{Arc, Mutex};
@@ -335,6 +336,11 @@ async fn compress_document(engine: State<'_, Engine>, id: DocId, max_dpi: f32, q
     Ok(CompressResponse { state, report })
 }
 
+#[tauri::command]
+async fn redact_areas(engine: State<'_, Engine>, id: DocId, page: u16, rects: Vec<[f32; 4]>) -> Result<DocState, String> {
+    engine.redact(id, page, rects).await
+}
+
 /// Returns (once) the PDFs the app was launched with.
 #[tauri::command]
 fn take_startup_files(files: State<'_, StartupFiles>) -> Vec<String> {
@@ -426,7 +432,8 @@ pub fn run() {
             document_protection,
             set_document_protection,
             export_images,
-            compress_document
+            compress_document,
+            redact_areas
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

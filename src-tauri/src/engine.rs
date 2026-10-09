@@ -7,7 +7,7 @@
 //! All coordinates handed to the UI are in PDF points with a top-left origin,
 //! in the page's displayed orientation (after /Rotate and the crop box).
 
-use crate::{annots, docops, edit, forms, pages};
+use crate::{annots, docops, edit, forms, pages, redact};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -808,6 +808,19 @@ impl Engine {
             d.push_undo(before);
             d.reload(pdfium, packed)?;
             Ok((d.state_with_pages(), report))
+        })
+        .await
+    }
+
+    /// Permanently removes content under displayed-page-space rects (undoable until saved).
+    pub async fn redact(&self, id: DocId, page: u16, rects: Vec<[f32; 4]>) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            d.snapshot()?;
+            redact::redact(&d.doc, page, &geom, &rects)?;
+            d.changed();
+            Ok(d.state(String::new()))
         })
         .await
     }
@@ -1647,5 +1660,47 @@ mod tests {
         assert!(im.width < 500 && im.width > 300, "~150 dpi for 200pt: {}", im.width);
         assert!((im.rect[2] - im.rect[0] - 200.0).abs() < 0.5, "placement kept");
         assert!(page_string(&e.page_text(doc.id, 0).await.unwrap()).contains("Big image test"));
+    }
+
+    #[tokio::test]
+    async fn redaction_removes_text_and_image_pixels() {
+        let (Some(multi), Some(img_pdf)) = (corpus("multipage.pdf"), corpus("image-page.pdf")) else { return };
+        let e = engine();
+        let doc = e.open(multi, None).await.unwrap();
+        // Find "quick brown" on line 1 and redact it.
+        let t = e.page_text(doc.id, 0).await.unwrap();
+        let s = page_string(&t);
+        let start = s.find("Line 1: The quick brown").unwrap() + "Line 1: The ".len();
+        let a = &t.boxes[start * 4..start * 4 + 4];
+        let end = start + "quick brown".len() - 1;
+        let b = &t.boxes[end * 4..end * 4 + 4];
+        e.redact(doc.id, 0, vec![[a[0], a[1], b[2], b[3]]]).await.unwrap();
+        let s = page_string(&e.page_text(doc.id, 0).await.unwrap());
+        let line1 = s.lines().find(|l| l.starts_with("Line 1:")).unwrap();
+        assert!(!line1.contains("quick") && !line1.contains("brown"), "{line1}");
+        assert!(line1.contains("Line 1:") && line1.contains("fox jumps"), "rest of the line kept: {line1}");
+        assert!(s.contains("Line 2: The quick brown fox"), "other lines untouched");
+        // Survives save + reopen.
+        let out = temp_path("redacted.pdf").to_string_lossy().into_owned();
+        e.save(doc.id, Some(out.clone()), None).await.unwrap();
+        let re = e.open(out, None).await.unwrap();
+        let s = page_string(&e.page_text(re.id, 0).await.unwrap());
+        assert!(!s.lines().find(|l| l.starts_with("Line 1:")).unwrap().contains("brown"));
+
+        // Image partly covered: covered pixels become black in the image data; the caption fully covered is gone.
+        let doc = e.open(img_pdf, None).await.unwrap();
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let im = layout.images[0].rect;
+        let cap = layout.blocks.iter().find(|b| b.text.starts_with("Caption")).unwrap().rect;
+        let left_half = [im[0] - 5.0, im[1] - 5.0, (im[0] + im[2]) / 2.0, im[3] + 5.0];
+        e.redact(doc.id, 0, vec![left_half, [cap[0] - 2.0, cap[1] - 2.0, cap[2] + 2.0, cap[3] + 2.0]]).await.unwrap();
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        assert_eq!(layout.images.len(), 1, "partly covered image kept");
+        assert!(!layout.blocks.iter().any(|b| b.text.contains("Caption")));
+        // Render without the black box: hide it by checking the image right half is still blue.
+        let img = e.render(doc.id, 0, 595).await.unwrap();
+        let [r, g, bl] = pixel(&img, ((im[0] + im[2]) / 2.0 + 30.0) as u32, ((im[1] + im[3]) / 2.0) as u32);
+        assert!(bl > 150 && r < 100 && g < 160, "right half untouched: {r},{g},{bl}");
+        e.save(doc.id, Some(temp_path("redacted-image.pdf").to_string_lossy().into()), None).await.unwrap();
     }
 }
