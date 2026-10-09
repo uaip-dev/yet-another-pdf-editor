@@ -3,6 +3,10 @@
   "bundle": {
     "resources": {
       "pdfium/pdfium.dll": "pdfium.dll"
-    }
+    },
+    "targets": [
+      "nsis",
+      "msi"
+    ]
   }
 }

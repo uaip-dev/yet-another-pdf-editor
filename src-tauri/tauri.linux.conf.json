@@ -3,6 +3,11 @@
   "bundle": {
     "resources": {
       "pdfium/libpdfium.so": "libpdfium.so"
-    }
+    },
+    "targets": [
+      "deb",
+      "appimage",
+      "rpm"
+    ]
   }
 }

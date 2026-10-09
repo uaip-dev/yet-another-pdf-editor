@@ -3,6 +3,10 @@
   "bundle": {
     "resources": {
       "pdfium/libpdfium.dylib": "libpdfium.dylib"
-    }
+    },
+    "targets": [
+      "app",
+      "dmg"
+    ]
   }
 }
