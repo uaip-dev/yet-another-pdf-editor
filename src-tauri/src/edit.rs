@@ -958,23 +958,39 @@ pub fn delete_objects(doc: &PdfDocument, page_index: u16, objects: &[usize]) -> 
 
 // ---- Images ----
 
-fn load_image_object<'a>(doc: &PdfDocument<'a>, path: &str) -> Result<(PdfPageImageObject<'a>, (u32, u32)), String> {
-    let lower = path.to_lowercase();
-    let dims = image::image_dimensions(path).map_err(|e| format!("Cannot read image: {e}"))?;
-    let obj = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        // Keep JPEG data as-is (DCT) instead of re-encoding it.
-        PdfPageImageObject::new_from_jpeg_file(doc, path).map_err(err)?
-    } else {
-        let img = image::open(path).map_err(|e| format!("Cannot read image: {e}"))?;
-        PdfPageImageObject::new(doc, &img).map_err(err)?
-    };
-    Ok((obj, dims))
+/// Where a new picture comes from: a file, or encoded bytes (e.g. a drawn signature).
+pub enum ImageSource {
+    Path(String),
+    Bytes(Vec<u8>),
+}
+
+fn load_image_object<'a>(doc: &PdfDocument<'a>, src: &ImageSource) -> Result<(PdfPageImageObject<'a>, (u32, u32)), String> {
+    let bad = |e: image::ImageError| format!("Cannot read image: {e}");
+    match src {
+        ImageSource::Path(path) => {
+            let lower = path.to_lowercase();
+            let dims = image::image_dimensions(path).map_err(bad)?;
+            let obj = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                // Keep JPEG data as-is (DCT) instead of re-encoding it.
+                PdfPageImageObject::new_from_jpeg_file(doc, path).map_err(err)?
+            } else {
+                let img = image::open(path).map_err(bad)?;
+                PdfPageImageObject::new(doc, &img).map_err(err)?
+            };
+            Ok((obj, dims))
+        }
+        ImageSource::Bytes(bytes) => {
+            let img = image::load_from_memory(bytes).map_err(bad)?;
+            let dims = (img.width(), img.height());
+            Ok((PdfPageImageObject::new(doc, &img).map_err(err)?, dims))
+        }
+    }
 }
 
 /// Replaces an image, fitting the new picture inside the old one's frame
 /// (same position, rotation and z-order; aspect ratio preserved).
 pub fn replace_image(doc: &PdfDocument, page_index: u16, index: usize, path: &str) -> Result<(), String> {
-    let (mut new_obj, (pw, ph)) = load_image_object(doc, path)?;
+    let (mut new_obj, (pw, ph)) = load_image_object(doc, &ImageSource::Path(path.to_string()))?;
     let mut page = doc.pages().get(page_index).map_err(err)?;
     page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
     let old = page.objects().get(index as PdfPageObjectIndex).map_err(err)?;
@@ -996,15 +1012,26 @@ pub fn replace_image(doc: &PdfDocument, page_index: u16, index: usize, path: &st
 }
 
 /// Adds an image with its top-left corner at a displayed page point.
-pub fn add_image(doc: &PdfDocument, page_index: u16, geom: &Geom, at: (f32, f32), path: &str) -> Result<(), String> {
-    let (mut obj, (pw, ph)) = load_image_object(doc, path)?;
+/// `width` (points) overrides the natural size; the aspect ratio is kept.
+pub fn add_image(
+    doc: &PdfDocument,
+    page_index: u16,
+    geom: &Geom,
+    at: (f32, f32),
+    src: &ImageSource,
+    width: Option<f32>,
+) -> Result<(), String> {
+    let (mut obj, (pw, ph)) = load_image_object(doc, src)?;
     let mut page = doc.pages().get(page_index).map_err(err)?;
     page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
     // 96 dpi, limited to half the page width.
     let (dw, _) = geom.display_size();
     let mut w = pw as f32 * 0.75;
     let mut h = ph as f32 * 0.75;
-    if w > dw * 0.5 {
+    if let Some(target) = width {
+        h *= target / w;
+        w = target;
+    } else if w > dw * 0.5 {
         h *= dw * 0.5 / w;
         w = dw * 0.5;
     }

@@ -1,5 +1,7 @@
+mod annots;
 mod edit;
 mod engine;
+mod forms;
 
 use engine::{DocId, DocInfo, DocState, Engine, Link, OutlineItem, PageText, SearchHit, Target};
 use std::sync::{Arc, Mutex};
@@ -148,7 +150,54 @@ async fn replace_image(
 
 #[tauri::command]
 async fn add_image(engine: State<'_, Engine>, id: DocId, page: u16, x: f32, y: f32, path: String) -> Result<DocState, String> {
-    engine.add_image(id, page, (x, y), path).await
+    engine.add_image(id, page, (x, y), edit::ImageSource::Path(path), None).await
+}
+
+/// Places a signature (PNG bytes drawn or typed in the UI) as page content.
+#[tauri::command]
+async fn add_signature(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    x: f32,
+    y: f32,
+    png: Vec<u8>,
+    width: f32,
+) -> Result<DocState, String> {
+    engine.add_image(id, page, (x, y), edit::ImageSource::Bytes(png), Some(width)).await
+}
+
+#[tauri::command]
+async fn page_extras(engine: State<'_, Engine>, id: DocId, page: u16) -> Result<engine::PageExtras, String> {
+    engine.page_extras(id, page).await
+}
+
+#[tauri::command]
+async fn add_annotation(engine: State<'_, Engine>, id: DocId, page: u16, annot: annots::NewAnnot) -> Result<DocState, String> {
+    engine.add_annotation(id, page, annot).await
+}
+
+#[tauri::command]
+async fn change_annotation(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    annot: usize,
+    change: engine::AnnotChange,
+) -> Result<DocState, String> {
+    engine.change_annotation(id, page, revision, annot, change).await
+}
+
+#[tauri::command]
+async fn fill_fields(
+    engine: State<'_, Engine>,
+    id: DocId,
+    page: u16,
+    revision: u32,
+    changes: Vec<(usize, forms::FieldValue)>,
+) -> Result<DocState, String> {
+    engine.fill_fields(id, page, revision, changes).await
 }
 
 #[tauri::command]
@@ -240,7 +289,12 @@ pub fn run() {
             add_image,
             undo,
             redo,
-            save_document
+            save_document,
+            add_signature,
+            page_extras,
+            add_annotation,
+            change_annotation,
+            fill_fields
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

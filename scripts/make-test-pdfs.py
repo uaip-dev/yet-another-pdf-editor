@@ -68,3 +68,21 @@ c.drawImage(str(out / "blue.png"), 72, 500, width=300, height=150)
 c.drawString(72, 470, "Caption under the image")
 c.save()
 print("wrote image-page.pdf and replacement images")
+
+# AcroForm: text, multiline, checkbox, radio group, combo box
+c = canvas.Canvas(str(out / "form.pdf"), pagesize=A4)
+c.setFont("Helvetica", 12)
+f = c.acroForm
+c.drawString(72, 760, "Name:")
+f.textfield(name="name", x=150, y=750, width=250, height=20, value="")
+c.drawString(72, 720, "Notes:")
+f.textfield(name="notes", x=150, y=650, width=250, height=60, fieldFlags="multiline", value="")
+c.drawString(72, 620, "Agree:")
+f.checkbox(name="agree", x=150, y=615, size=16, checked=False)
+c.drawString(72, 580, "Size:")
+for i, v in enumerate(["small", "medium", "large"]):
+    f.radio(name="size", value=v, x=150 + i * 60, y=575, size=16, selected=False)
+c.drawString(72, 540, "Country:")
+f.choice(name="country", options=["Malaysia", "Singapore", "Indonesia"], value="Malaysia", x=150, y=532, width=150, height=20)
+c.save()
+print("wrote form.pdf")

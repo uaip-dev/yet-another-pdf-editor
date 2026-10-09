@@ -7,7 +7,7 @@
 //! All coordinates handed to the UI are in PDF points with a top-left origin,
 //! in the page's displayed orientation (after /Rotate and the crop box).
 
-use crate::edit;
+use crate::{annots, edit, forms};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -201,6 +201,24 @@ pub struct DocState {
     pub path: String,
 }
 
+/// Annotations and form fields of one page.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageExtras {
+    pub revision: u32,
+    pub annotations: Vec<annots::AnnotInfo>,
+    pub fields: Vec<forms::FieldInfo>,
+}
+
+/// A change to an existing annotation.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum AnnotChange {
+    Rect([f32; 4]),
+    Contents(String),
+    Delete,
+}
+
 /// Editable targets on a page.
 #[derive(Clone, Copy, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -246,6 +264,12 @@ impl<'a> OpenDoc<'a> {
     /// Records an undo snapshot; call before changing the document.
     fn snapshot(&mut self) -> Result<(), String> {
         let bytes = self.doc.save_to_bytes().map_err(err)?;
+        self.push_undo(bytes);
+        Ok(())
+    }
+
+    /// Records already-serialized document bytes as the undo point.
+    fn push_undo(&mut self, bytes: Vec<u8>) {
         self.undo.push(bytes);
         self.redo.clear();
         while self.undo.len() > UNDO_LIMIT_STEPS
@@ -253,7 +277,6 @@ impl<'a> OpenDoc<'a> {
         {
             self.undo.remove(0);
         }
-        Ok(())
     }
 
     /// Call after a change: drops caches and bumps the revision.
@@ -486,13 +509,94 @@ impl Engine {
         .await
     }
 
-    pub async fn add_image(&self, id: DocId, page: u16, at: (f32, f32), path: String) -> Result<DocState, String> {
+    pub async fn add_image(
+        &self,
+        id: DocId,
+        page: u16,
+        at: (f32, f32),
+        src: edit::ImageSource,
+        width: Option<f32>,
+    ) -> Result<DocState, String> {
         self.run(move |docs| {
             let d = docs.get(id)?;
             let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
             d.snapshot()?;
-            edit::add_image(&d.doc, page, &geom, at, &path)?;
+            edit::add_image(&d.doc, page, &geom, at, &src, width)?;
             d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    /// Annotations and form fields of a page.
+    pub async fn page_extras(&self, id: DocId, page: u16) -> Result<PageExtras, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            let p = d.doc.pages().get(page).map_err(err)?;
+            let geom = Geom::of(&p);
+            Ok(PageExtras {
+                revision: d.revision,
+                annotations: annots::list(&p, &geom),
+                fields: forms::list(&p, &geom),
+            })
+        })
+        .await
+    }
+
+    pub async fn add_annotation(&self, id: DocId, page: u16, new: annots::NewAnnot) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            let current = d.doc.save_to_bytes().map_err(err)?;
+            let updated = annots::create(&current, page, &geom, new)?;
+            d.push_undo(current);
+            d.reload(pdfium, updated)?;
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    pub async fn change_annotation(
+        &self,
+        id: DocId,
+        page: u16,
+        revision: u32,
+        annot: usize,
+        change: AnnotChange,
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let geom = Geom::of(&d.doc.pages().get(page).map_err(err)?);
+            d.snapshot()?;
+            match change {
+                AnnotChange::Rect(r) => annots::set_rect(&d.doc, page, &geom, annot, r)?,
+                AnnotChange::Contents(t) => annots::set_contents(&d.doc, page, annot, &t)?,
+                AnnotChange::Delete => annots::delete(&d.doc, page, annot)?,
+            }
+            d.changed();
+            Ok(d.state(String::new()))
+        })
+        .await
+    }
+
+    /// Fills form fields on a page through PDFium's form-fill engine.
+    pub async fn fill_fields(
+        &self,
+        id: DocId,
+        page: u16,
+        revision: u32,
+        changes: Vec<(usize, forms::FieldValue)>,
+    ) -> Result<DocState, String> {
+        self.run(move |docs| {
+            let pdfium = docs.pdfium;
+            let d = docs.get(id)?;
+            d.check(revision)?;
+            let current = d.doc.save_to_bytes().map_err(err)?;
+            let filled = forms::fill(d.doc.bindings(), &current, d.password.as_deref(), page, &changes)?;
+            d.push_undo(current);
+            d.reload(pdfium, filled)?;
             Ok(d.state(String::new()))
         })
         .await
@@ -991,7 +1095,7 @@ mod tests {
             assert!((a - b).abs() < 0.5, "{:?}", layout.images[0].rect);
         }
 
-        e.add_image(doc.id, 0, (300.0, 400.0), jpg).await.unwrap();
+        e.add_image(doc.id, 0, (300.0, 400.0), edit::ImageSource::Path(jpg), None).await.unwrap();
         let (rev, layout) = e.page_layout(doc.id, 0).await.unwrap();
         assert_eq!(layout.images.len(), 2);
         let added = layout.images.iter().find(|i| i.width == 160).unwrap();
@@ -1024,5 +1128,137 @@ mod tests {
         assert!(squash(&text).contains(&tail), "edited text is extractable: {tail:?}");
         let out = temp_path("sample-edited.pdf");
         e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
+    }
+
+    fn pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let w = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let i = 8 + ((y * w + x) * 4) as usize;
+        [bytes[i], bytes[i + 1], bytes[i + 2]]
+    }
+
+    #[tokio::test]
+    async fn annotations_create_list_change_delete() {
+        let Some(path) = corpus("multipage.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        // "Line 1: ..." is the first body line: find its rect from the text.
+        let t = e.page_text(doc.id, 0).await.unwrap();
+        let s = page_string(&t);
+        let start = s.find("Line 1:").unwrap();
+        let b = &t.boxes[start * 4..start * 4 + 4];
+        let line = [b[0], b[1], b[0] + 200.0, b[3]];
+
+        use annots::{MarkupKind, NewAnnot, ShapeKind};
+        let yellow = [255, 210, 0];
+        e.add_annotation(doc.id, 0, NewAnnot::Markup { kind: MarkupKind::Highlight, rects: vec![line], color: yellow }).await.unwrap();
+        let under = [line[0], line[1] + 18.0, line[2], line[3] + 18.0];
+        e.add_annotation(doc.id, 0, NewAnnot::Markup { kind: MarkupKind::Underline, rects: vec![under], color: [0, 0, 255] }).await.unwrap();
+        e.add_annotation(doc.id, 0, NewAnnot::Note { at: (500.0, 120.0), text: "Check this".into(), color: yellow }).await.unwrap();
+        let stroke = vec![(100.0, 700.0), (150.0, 720.0), (200.0, 700.0)];
+        e.add_annotation(doc.id, 0, NewAnnot::Ink { strokes: vec![stroke], color: [220, 0, 0], width: 3.0 }).await.unwrap();
+        e.add_annotation(doc.id, 0, NewAnnot::Shape { kind: ShapeKind::Rectangle, rect: [300.0, 650.0, 400.0, 720.0], color: [0, 128, 0], width: 2.0 })
+            .await
+            .unwrap();
+        e.add_annotation(doc.id, 0, NewAnnot::Shape { kind: ShapeKind::Ellipse, rect: [420.0, 650.0, 520.0, 720.0], color: [0, 0, 200], width: 2.0 })
+            .await
+            .unwrap();
+
+        let x = e.page_extras(doc.id, 0).await.unwrap();
+        let kinds: Vec<&str> = x.annotations.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, ["highlight", "underline", "note", "ink", "square", "circle"]);
+        let note = &x.annotations[2];
+        assert_eq!(note.contents, "Check this");
+        assert!((note.rect[0] - 500.0).abs() < 0.5 && (note.rect[1] - 120.0).abs() < 0.5);
+        assert!(!x.annotations[0].movable && note.movable);
+
+        // The highlight is drawn: its area is yellowish when rendered at 1px/pt.
+        let img = e.render(doc.id, 0, 595).await.unwrap();
+        let [r, g, bl] = pixel(&img, (line[0] + 3.0) as u32, ((line[1] + line[3]) / 2.0) as u32);
+        assert!(r > 200 && g > 170 && bl < 120, "highlight colour {r},{g},{bl}");
+        // The red pen stroke is drawn too.
+        let [r, g, _] = pixel(&img, 150, 719);
+        assert!(r > 150 && g < 100, "ink colour {r},{g}");
+
+        // Move the note, change its text, delete the ellipse.
+        let st = e.change_annotation(doc.id, 0, x.revision, note.id, AnnotChange::Rect([50.0, 50.0, 70.0, 70.0])).await.unwrap();
+        let st = e.change_annotation(doc.id, 0, st.revision, note.id, AnnotChange::Contents("Done".into())).await.unwrap();
+        e.change_annotation(doc.id, 0, st.revision, x.annotations[5].id, AnnotChange::Delete).await.unwrap();
+        let x = e.page_extras(doc.id, 0).await.unwrap();
+        assert_eq!(x.annotations.len(), 5);
+        let note = x.annotations.iter().find(|a| a.kind == "note").unwrap();
+        assert_eq!(note.contents, "Done");
+        assert!((note.rect[0] - 50.0).abs() < 0.5 && (note.rect[1] - 50.0).abs() < 0.5);
+
+        // Survives save + reopen.
+        let out = temp_path("annotated.pdf");
+        e.save(doc.id, Some(out.to_string_lossy().into()), None).await.unwrap();
+        let re = e.open(out.to_string_lossy().into(), None).await.unwrap();
+        assert_eq!(e.page_extras(re.id, 0).await.unwrap().annotations.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn fill_form_fields() {
+        let Some(path) = corpus("form.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let x = e.page_extras(doc.id, 0).await.unwrap();
+        let by = |name: &str| x.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("field {name}"));
+        assert_eq!(by("name").kind, "text");
+        assert!(by("notes").multiline);
+        assert_eq!(by("agree").kind, "checkbox");
+        assert_eq!(by("country").kind, "combo");
+        assert_eq!(by("country").options, ["Malaysia", "Singapore", "Indonesia"]);
+        let radios: Vec<_> = x.fields.iter().filter(|f| f.kind == "radio").collect();
+        assert_eq!(radios.len(), 3);
+
+        use forms::FieldValue;
+        let changes = vec![
+            (by("name").id, FieldValue::Text("Siti Aminah".into())),
+            (by("notes").id, FieldValue::Text("Line one\nLine two".into())),
+            (by("agree").id, FieldValue::Checked(true)),
+            (radios[1].id, FieldValue::Checked(true)),
+            (by("country").id, FieldValue::Select(1)),
+        ];
+        let st = e.fill_fields(doc.id, 0, x.revision, changes).await.unwrap();
+        assert!(st.dirty && st.can_undo);
+
+        let x = e.page_extras(doc.id, 0).await.unwrap();
+        let by = |name: &str| x.fields.iter().find(|f| f.name == name).unwrap();
+        assert_eq!(by("name").value, "Siti Aminah");
+        assert!(by("notes").value.contains("Line two"));
+        assert!(by("agree").checked);
+        let checked: Vec<bool> = x.fields.iter().filter(|f| f.kind == "radio").map(|f| f.checked).collect();
+        assert_eq!(checked, [false, true, false]);
+        assert_eq!(by("country").value, "Singapore");
+
+        // The value is drawn into the field's appearance (dark pixels inside the box).
+        let img = e.render(doc.id, 0, 595).await.unwrap();
+        let r = by("name").rect;
+        let mut dark = 0;
+        for x in (r[0] as u32 + 2)..(r[2] as u32 - 2) {
+            for y in (r[1] as u32 + 2)..(r[3] as u32 - 2) {
+                if pixel(&img, x, y).iter().all(|&c| c < 100) {
+                    dark += 1;
+                }
+            }
+        }
+        assert!(dark > 20, "field text rendered ({dark} dark px)");
+
+        // Undo returns to the empty form.
+        e.undo(doc.id, false).await.unwrap();
+        let x = e.page_extras(doc.id, 0).await.unwrap();
+        assert_eq!(x.fields.iter().find(|f| f.name == "name").unwrap().value, "");
+    }
+
+    #[tokio::test]
+    async fn signature_from_png_bytes() {
+        let Some(path) = corpus("letter.pdf") else { return };
+        let e = engine();
+        let doc = e.open(path, None).await.unwrap();
+        let png = std::fs::read(corpus("red-square.png").unwrap()).unwrap();
+        e.add_image(doc.id, 0, (100.0, 500.0), edit::ImageSource::Bytes(png), Some(150.0)).await.unwrap();
+        let (_, layout) = e.page_layout(doc.id, 0).await.unwrap();
+        let im = &layout.images[0];
+        assert!((im.rect[2] - im.rect[0] - 150.0).abs() < 0.5 && (im.rect[3] - im.rect[1] - 150.0).abs() < 0.5);
     }
 }
