@@ -3,6 +3,8 @@
 A lightweight, open-source PDF viewer and editor for Windows (macOS and Linux later).
 It's built with Tauri 2, Svelte 5 and PDFium. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
+![Search in Yet Another PDF Editor](docs/screenshots/search.png)
+
 ## Prerequisites (Windows)
 - [Rust](https://rustup.rs) (stable, MSVC toolchain) and Visual Studio C++ Build Tools
 - Node.js 20+ and pnpm

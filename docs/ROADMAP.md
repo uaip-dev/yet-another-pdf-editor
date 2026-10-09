@@ -17,8 +17,8 @@ Editing text and images is the selling point, so it comes right after the viewer
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Project setup, PDFium binding, render pages, open/drag-drop, password PDFs, zoom | **done** |
-| 1 | Viewer: thumbnails, outline, text select/copy, search, links, print, recent files, file association, tabs | next |
-| 2 | **Editing:** edit existing text, add text, replace/move/resize/delete/add images, undo/redo, save/save-as | |
+| 1 | Viewer: thumbnails, outline, text select/copy, search, links, print, recent files, file association, tabs | **done** |
+| 2 | **Editing:** edit existing text, add text, replace/move/resize/delete/add images, undo/redo, save/save-as | next |
 | 3 | Annotations and forms: highlight, underline, strikeout, notes, ink, shapes, stamps, AcroForm fill, signatures | |
 | 4 | Page management: insert, delete, reorder, rotate, extract, merge, split | |
 | 5 | Polish: export images, compress, encrypt, properties, true redaction, macOS + Linux builds, auto-update | |
