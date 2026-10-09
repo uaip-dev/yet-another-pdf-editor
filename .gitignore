@@ -17,3 +17,5 @@ vite.config.ts.timestamp-*
 
 # Extension UI copied in at build time (docs/EXTENSIONS.md)
 /.pro-ui/
+# Extension static assets (docs/EXTENSIONS.md)
+/static/ext/

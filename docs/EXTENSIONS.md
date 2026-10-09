@@ -67,3 +67,9 @@ YAPE_PRO_UI=.pro-ui pnpm tauri build
 
 Keeping the components inside the project lets them import anything from `$lib` (API calls,
 icons, styles) and use the same `svelte` dependency.
+
+### Static assets
+
+Files an extension needs at a fixed URL (web workers, WebAssembly, data files) go in
+`static/ext/` (git-ignored). They are served at `/ext/...` in development and included in
+the build.
