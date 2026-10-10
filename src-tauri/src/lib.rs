@@ -36,6 +36,11 @@ impl Capabilities {
         }
     }
 
+    /// Withdraws a feature (e.g. when an extension's license ends while running).
+    pub fn remove(&self, name: &str) {
+        self.0.lock().unwrap().retain(|n| n != name);
+    }
+
     pub fn list(&self) -> Vec<String> {
         self.0.lock().unwrap().clone()
     }
