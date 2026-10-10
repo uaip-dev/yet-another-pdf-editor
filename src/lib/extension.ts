@@ -17,6 +17,8 @@ export interface ExtensionContext {
     pages: number[];
     /** Size of every page in points, as displayed (after rotation). */
     sizes: PageInfo[];
+    /** Unsaved changes (the file on disk is older than what is shown). */
+    dirty: boolean;
   } | null;
   /** Feature names registered by backend extensions. */
   capabilities: string[];
